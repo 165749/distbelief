@@ -151,11 +151,11 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=64, metavar='N', help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=10000, metavar='N', help='input batch size for testing (default: 10000)')
     parser.add_argument('--epochs', type=int, default=20, metavar='N', help='number of epochs to train (default: 20)')
-    parser.add_argument('--lr', type=float, default=0.003, metavar='LR', help='learning rate (default: 0.1)')
+    parser.add_argument('--lr', type=float, default=0.1, metavar='LR', help='learning rate (default: 0.1)')
     parser.add_argument('--num-pull', type=int, default=5, metavar='N', help='how often to pull params (default: 5)')
     parser.add_argument('--num-push', type=int, default=5, metavar='N', help='how often to push grads (default: 5)')
     parser.add_argument('--cuda', action='store_true', default=False, help='use CUDA for training')
-    parser.add_argument('--log-interval', type=int, default=20, metavar='N', help='how often to evaluate and print out')
+    parser.add_argument('--log-interval', type=int, default=50, metavar='N', help='how often to evaluate and print out')
     parser.add_argument('--no-distributed', action='store_true', default=False, help='whether to use DownpourSGD or normal SGD')
     parser.add_argument('--rank', type=int, metavar='N', help='rank of current process (0 is server, 1+ is training node)')
     parser.add_argument('--world-size', type=int, default=3, metavar='N', help='size of the world')
@@ -172,7 +172,7 @@ if __name__ == "__main__":
         """
         os.environ['MASTER_ADDR'] = args.master
         os.environ['MASTER_PORT'] = args.port
-        dist.init_process_group('tcp', rank=args.rank, world_size=args.world_size)
+        dist.init_process_group('gloo', rank=args.rank, world_size=args.world_size)
         if args.server:
             init_server()
     main(args)

@@ -14,6 +14,7 @@ class ParameterServer(MessageListener):
     """ParameterServer"""
     def __init__(self, model):
         _LOGGER.info("Creating ParameterServer")
+        # By default grads=False in ravel_model_params(), meaning that will only return parameter.data here
         self.parameter_shard = torch.rand(ravel_model_params(model).numel())
         self.model = model
         #init superclass
@@ -27,7 +28,7 @@ class ParameterServer(MessageListener):
             self.parameter_shard = parameter.clone()
 
         elif message_code == MessageCode.ParameterRequest:
-            send_message(MessageCode.ParameterUpdate, self.parameter_shard, dst=sender)    
+            send_message(MessageCode.ParameterUpdate, self.parameter_shard, dst=sender)
 
         elif message_code == MessageCode.GradientUpdate:
             self.parameter_shard.add_(parameter)

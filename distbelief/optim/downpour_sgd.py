@@ -59,13 +59,15 @@ class DownpourSGD(Optimizer):
         
         # send parameter request every N iterations
         if self.idx % self.n_pull == 0:
-            send_message(MessageCode.ParameterRequest, self.accumulated_gradients) # dummy val 
+            # TODO (zhuojin): dummy val for the second argument
+            send_message(MessageCode.ParameterRequest, self.accumulated_gradients)
+            # will update model.parameter.data received from the server in another thread concurrently
 
         #get the lr
         lr = self.param_groups[0]['lr']
         # keep track of accumulated gradients so that we can send 
-        gradients = ravel_model_params(self.model, grads=True)
-        self.accumulated_gradients.add_(-lr, gradients)
+        gradients = ravel_model_params(self.model, grads=True)  # Return model.parameter.grad
+        self.accumulated_gradients.add_(gradients * (-lr))
 
         # send gradient update every N iterations
         if self.idx % self.n_push == 0:
@@ -78,7 +80,8 @@ class DownpourSGD(Optimizer):
                 if p.grad is None:
                     continue
                 d_p = p.grad.data
-                p.data.add_(-group['lr'], d_p)
+                p.data.add_(d_p * (-group['lr']))
+                # NOTE: the parameters updated here will also affect self.model
         
         self.idx += 1
         return loss

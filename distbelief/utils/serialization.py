@@ -24,6 +24,7 @@ def unravel_model_params(model, parameter_update):
     for parameter in model.parameters():
         numel = parameter.data.numel()
         size = parameter.data.size()
+        # Update data (but not grad) in model.parameter()
         parameter.data.copy_(parameter_update[current_index:current_index+numel].view(size))
         current_index += numel
 
