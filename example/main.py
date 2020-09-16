@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from datetime import datetime
+import time
 from models import LeNet, AlexNet
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 import pandas as pd
@@ -106,6 +107,9 @@ def main(args):
         val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
         scheduler.step(val_loss)
 
+    # Stop listener
+    optimizer.stop()
+
     df = pd.DataFrame(logs)
     print(df)
     if not os.path.exists('log'):
@@ -150,7 +154,7 @@ def evaluate(net, testloader, args, verbose=False):
 
 def init_server():
     model = AlexNet()
-    server = ParameterServer(model=model)
+    server = ParameterServer(model=model, active_worker=args.world_size-1)
     server.run()
 
 if __name__ == "__main__":
@@ -186,24 +190,21 @@ if __name__ == "__main__":
                 span = tracer.active_span
                 context = {}
                 tracer.inject(span, Format.TEXT_MAP, context)
-                print(context)
                 numbers = trace_context_to_numbers(context)
-                print(numbers)
-                print(np.array(numbers, dtype=np.int64))
                 tensor = torch.from_numpy(np.array(numbers, dtype=np.int64))
-                print(tensor)
                 for idx in range(1, args.world_size):
                     dist.send(tensor=tensor, dst=idx)  # send to every worker
-                init_server()
+                with tracer.start_active_span('server'):
+                    init_server()
         else:
             tensor = torch.zeros(4, dtype=torch.int64)  # TODO (zhuojin): Remove hard-code
             dist.recv(tensor=tensor)
-            print(tensor)
-            numbers = tensor.tolist()
-            print(numbers)
-            context = numbers_to_trace_context(numbers)
+            context = numbers_to_trace_context(tensor.tolist())
             span_ctx = tracer.extract(Format.TEXT_MAP, context)
             with tracer.start_active_span('worker {}'.format(args.rank), child_of=span_ctx):
                 main(args)
+        dist.destroy_process_group()
+        # Wait for trace collection
+        time.sleep(2)
     else:
         main(args)

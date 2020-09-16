@@ -15,6 +15,7 @@ class MessageCode(Enum):
     GradientUpdate = 1
     ParameterUpdate = 2
     EvaluateParams = 3
+    Complete = 4
 
 
 class MessageListener(Thread):
@@ -28,6 +29,7 @@ class MessageListener(Thread):
         :param model: nn.Module to be defined by the user
         """
         self.model = model
+        self.running = True
         _LOGGER.info("Setting m_parameter")
         self.m_parameter = torch.zeros(ravel_model_params(model).numel() + 2)
         super(MessageListener, self).__init__()
@@ -51,13 +53,16 @@ class MessageListener(Thread):
                          MessageCode(self.m_parameter[1].item()),
                          self.m_parameter[2:])
 
+    def stop(self):
+        self.running = False
+
 
 def send_message(message_code, payload, dst=0):
     """Sends a message to a destination
     Concatenates both the message code and destination with the payload into a single tensor and then sends that as a tensor
     """
+    _LOGGER.info("SENDING MESSAGE: {} RANK: {}".format(message_code, dist.get_rank()))
     with tracer.start_active_span('send'):
-        _LOGGER.info("SENDING MESSAGE: {} RANK: {}".format(message_code, dist.get_rank()))
         m_parameter = torch.Tensor([dist.get_rank(), message_code.value])
         m_parameter = torch.cat((m_parameter, payload))
         # Temporarily use synchronous sending here

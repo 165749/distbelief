@@ -3,19 +3,24 @@ import torch
 from torch.optim.optimizer import Optimizer, required
 from distbelief.utils.serialization import ravel_model_params, unravel_model_params
 from distbelief.utils.messaging import MessageCode, MessageListener, send_message
+from distbelief.utils.tracer import tracer
 
 _LOGGER = logging.getLogger(__name__)
 
 class DownpourListener(MessageListener):
     """DownpourListener"""
-    def __init__(self, model):
+    def __init__(self, model, span_ctx):
+        self.span_ctx = span_ctx
         super().__init__(model)
 
     def receive(self, sender, message_code, parameter):
         """receive parameter updates from the server and reflect them into the client's model."""
         _LOGGER.info("Processing message: {}".format(message_code.name))
-        if message_code == MessageCode.ParameterUpdate:
-            unravel_model_params(self.model, parameter)
+        with tracer.start_active_span('local update', child_of=self.span_ctx):
+            if message_code == MessageCode.ParameterUpdate:
+                unravel_model_params(self.model, parameter)
+            elif message_code == MessageCode.Complete:
+                self.stop()
 
 class DownpourSGD(Optimizer):
     """DownpourSGD"""
@@ -32,7 +37,8 @@ class DownpourSGD(Optimizer):
             raise ValueError("Invalid learning rate: {}".format(lr))
 
         defaults = dict(lr=lr,)
-        self.accumulated_gradients = torch.zeros(ravel_model_params(model).size())
+        self.gradients_shape = ravel_model_params(model).size()
+        self.accumulated_gradients = torch.zeros(self.gradients_shape)
         self.n_pull = n_pull
         self.n_push = n_push
 
@@ -41,8 +47,9 @@ class DownpourSGD(Optimizer):
         send_message(MessageCode.ParameterUpdate, ravel_model_params(self.model))
         self.idx = 0
 
-        listener = DownpourListener(self.model)
-        listener.start()
+        # Pass tracing span to listener thread
+        self.listener_thread = DownpourListener(self.model, tracer.scope_manager.active.span)
+        self.listener_thread.start()
 
         super(DownpourSGD, self).__init__(params, defaults)
 
@@ -60,7 +67,7 @@ class DownpourSGD(Optimizer):
         # send parameter request every N iterations
         if self.idx % self.n_pull == 0:
             # TODO (zhuojin): dummy val for the second argument
-            send_message(MessageCode.ParameterRequest, self.accumulated_gradients)
+            send_message(MessageCode.ParameterRequest, torch.zeros(self.gradients_shape))
             # will update model.parameter.data received from the server in another thread concurrently
 
         #get the lr
@@ -85,3 +92,9 @@ class DownpourSGD(Optimizer):
         
         self.idx += 1
         return loss
+
+    def stop(self):
+        # Inform the server about completion
+        # TODO (zhuojin): dummy val for the second argument
+        send_message(MessageCode.Complete, torch.zeros(self.gradients_shape))
+        self.listener_thread.join()

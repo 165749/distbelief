@@ -13,11 +13,12 @@ _LOGGER = logging.getLogger(__name__)
 
 class ParameterServer(MessageListener):
     """ParameterServer"""
-    def __init__(self, model):
+    def __init__(self, model, active_worker):
         _LOGGER.info("Creating ParameterServer")
         # By default grads=False in ravel_model_params(), meaning that will only return parameter.data here
         self.parameter_shard = torch.rand(ravel_model_params(model).numel())
         self.model = model
+        self.active_worker = active_worker
         #init superclass
         super().__init__(model)
 
@@ -26,6 +27,7 @@ class ParameterServer(MessageListener):
             print("Processing message: {} from sender {}".format(message_code.name, sender))
 
             if message_code == MessageCode.ParameterUpdate:
+                # TODO (zhuojin): Think about the case of multiple workers
                 #be sure to clone here
                 self.parameter_shard = parameter.clone()
 
@@ -34,3 +36,11 @@ class ParameterServer(MessageListener):
 
             elif message_code == MessageCode.GradientUpdate:
                 self.parameter_shard.add_(parameter)
+
+            elif message_code == MessageCode.Complete:
+                # Confirm with worker
+                # TODO (zhuojin): dummy val for the second argument
+                send_message(MessageCode.Complete, torch.zeros(self.parameter_shard.size()), dst=sender)
+                self.active_worker -= 1
+                if self.active_worker == 0:
+                    self.stop()
