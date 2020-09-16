@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 from threading import Thread
 from distbelief.utils.serialization import ravel_model_params
+from distbelief.utils.tracer import tracer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,8 +56,9 @@ def send_message(message_code, payload, dst=0):
     """Sends a message to a destination
     Concatenates both the message code and destination with the payload into a single tensor and then sends that as a tensor
     """
-    _LOGGER.info("SENDING MESSAGE: {} RANK: {}".format(message_code, dist.get_rank()))
-    m_parameter = torch.Tensor([dist.get_rank(), message_code.value])
-    m_parameter = torch.cat((m_parameter, payload))
-    # Temporarily use synchronous sending here
-    dist.send(tensor=m_parameter, dst=dst)
+    with tracer.start_active_span('send'):
+        _LOGGER.info("SENDING MESSAGE: {} RANK: {}".format(message_code, dist.get_rank()))
+        m_parameter = torch.Tensor([dist.get_rank(), message_code.value])
+        m_parameter = torch.cat((m_parameter, payload))
+        # Temporarily use synchronous sending here
+        dist.send(tensor=m_parameter, dst=dst)

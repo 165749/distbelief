@@ -18,6 +18,8 @@ import pandas as pd
 import torch.optim as optim
 from distbelief.optim import DownpourSGD
 from distbelief.server import ParameterServer
+from distbelief.utils.tracer import tracer, numbers_to_trace_context, trace_context_to_numbers
+from opentracing.propagation import Format
 
 def get_dataset(args, transform):
     """
@@ -62,47 +64,52 @@ def main(args):
 
     for epoch in range(args.epochs):  # loop over the dataset multiple times
         print("Training for epoch {}".format(epoch))
-        for i, data in enumerate(trainloader, 0):
-            # get the inputs
-            inputs, labels = data
+        with tracer.start_active_span('Epoch {}'.format(epoch)):
+            for i, data in enumerate(trainloader, 0):
+                with tracer.start_active_span('Step {}'.format(i)):
+                    # get the inputs
+                    inputs, labels = data
 
-            if args.cuda:
-                inputs, labels = inputs.cuda(), labels.cuda()
+                    if args.cuda:
+                        inputs, labels = inputs.cuda(), labels.cuda()
 
-            # zero the parameter gradients
-            optimizer.zero_grad()
-            # forward + backward + optimize
-            outputs = net(inputs)
-            loss = F.cross_entropy(outputs, labels)
-            loss.backward()
-            optimizer.step()
+                    with tracer.start_active_span('Forward'):
+                        # zero the parameter gradients
+                        optimizer.zero_grad()
+                        # forward + backward + optimize
+                        outputs = net(inputs)
+                    with tracer.start_active_span('Backward'):
+                        loss = F.cross_entropy(outputs, labels)
+                        loss.backward()
+                        optimizer.step()
 
-            _, predicted = torch.max(outputs, 1)
-            accuracy = accuracy_score(predicted, labels)
+                    _, predicted = torch.max(outputs, 1)
+                    accuracy = accuracy_score(predicted, labels)
 
-            log_obj = {
-                'timestamp': datetime.now(),
-                'iteration': i,
-                'training_loss': loss.item(),
-                'training_accuracy': accuracy,
-            }
+                    log_obj = {
+                        'timestamp': datetime.now(),
+                        'iteration': i,
+                        'training_loss': loss.item(),
+                        'training_accuracy': accuracy,
+                    }
 
-            if i % args.log_interval == 0 and i > 0:    # print every n mini-batches
-                log_obj['test_loss'], log_obj['test_accuracy']= evaluate( net, testloader, args)
-                print("Timestamp: {timestamp} | "
-                      "Iteration: {iteration:6} | "
-                      "Loss: {training_loss:6.4f} | "
-                      "Accuracy : {training_accuracy:6.4f} | "
-                      "Test Loss: {test_loss:6.4f} | "
-                      "Test Accuracy: {test_accuracy:6.4f}".format(**log_obj))
+                    if i % args.log_interval == 0 and i > 0:    # print every n mini-batches
+                        log_obj['test_loss'], log_obj['test_accuracy'] = evaluate(net, testloader, args)
+                        print("Timestamp: {timestamp} | "
+                              "Iteration: {iteration:6} | "
+                              "Loss: {training_loss:6.4f} | "
+                              "Accuracy : {training_accuracy:6.4f} | "
+                              "Test Loss: {test_loss:6.4f} | "
+                              "Test Accuracy: {test_accuracy:6.4f}".format(**log_obj))
+                    logs.append(log_obj)
 
-            logs.append(log_obj)
-                
         val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
         scheduler.step(val_loss)
 
     df = pd.DataFrame(logs)
     print(df)
+    if not os.path.exists('log'):
+        os.mkdir('log')
     if args.no_distributed:
         if args.cuda:
             df.to_csv('log/gpu.csv', index_label='index')
@@ -173,6 +180,30 @@ if __name__ == "__main__":
         os.environ['MASTER_ADDR'] = args.master
         os.environ['MASTER_PORT'] = args.port
         dist.init_process_group('gloo', rank=args.rank, world_size=args.world_size)
+
         if args.server:
-            init_server()
-    main(args)
+            with tracer.start_active_span('distbelief') as scope:
+                span = tracer.active_span
+                context = {}
+                tracer.inject(span, Format.TEXT_MAP, context)
+                print(context)
+                numbers = trace_context_to_numbers(context)
+                print(numbers)
+                print(np.array(numbers, dtype=np.int64))
+                tensor = torch.from_numpy(np.array(numbers, dtype=np.int64))
+                print(tensor)
+                for idx in range(1, args.world_size):
+                    dist.send(tensor=tensor, dst=idx)  # send to every worker
+                init_server()
+        else:
+            tensor = torch.zeros(4, dtype=torch.int64)  # TODO (zhuojin): Remove hard-code
+            dist.recv(tensor=tensor)
+            print(tensor)
+            numbers = tensor.tolist()
+            print(numbers)
+            context = numbers_to_trace_context(numbers)
+            span_ctx = tracer.extract(Format.TEXT_MAP, context)
+            with tracer.start_active_span('worker {}'.format(args.rank), child_of=span_ctx):
+                main(args)
+    else:
+        main(args)
