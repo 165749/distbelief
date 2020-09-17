@@ -45,12 +45,14 @@ def main(args):
     logs = []
 
     transform = transforms.Compose([
+                transforms.Resize(64),  # For Alexnet
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
             ])
 
     trainloader, testloader = get_dataset(args, transform)
-    net = AlexNet()
+    # net = AlexNet()
+    net = torchvision.models.alexnet(num_classes=10)
 
     if args.no_distributed:
         optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.0)
@@ -153,7 +155,8 @@ def evaluate(net, testloader, args, verbose=False):
     return test_loss, test_accuracy
 
 def init_server():
-    model = AlexNet()
+    # model = AlexNet()
+    model = torchvision.models.alexnet(num_classes=10)
     server = ParameterServer(model=model, active_worker=args.world_size-1)
     server.run()
 
@@ -163,8 +166,8 @@ if __name__ == "__main__":
     parser.add_argument('--test-batch-size', type=int, default=10000, metavar='N', help='input batch size for testing (default: 10000)')
     parser.add_argument('--epochs', type=int, default=20, metavar='N', help='number of epochs to train (default: 20)')
     parser.add_argument('--lr', type=float, default=0.1, metavar='LR', help='learning rate (default: 0.1)')
-    parser.add_argument('--num-pull', type=int, default=5, metavar='N', help='how often to pull params (default: 5)')
-    parser.add_argument('--num-push', type=int, default=5, metavar='N', help='how often to push grads (default: 5)')
+    parser.add_argument('--num-pull', type=int, default=1, metavar='N', help='how often to pull params (default: 1)')
+    parser.add_argument('--num-push', type=int, default=1, metavar='N', help='how often to push grads (default: 1)')
     parser.add_argument('--cuda', action='store_true', default=False, help='use CUDA for training')
     parser.add_argument('--log-interval', type=int, default=50, metavar='N', help='how often to evaluate and print out')
     parser.add_argument('--no-distributed', action='store_true', default=False, help='whether to use DownpourSGD or normal SGD')

@@ -14,8 +14,20 @@ class MessageCode(Enum):
     ParameterRequest = 0
     GradientUpdate = 1
     ParameterUpdate = 2
-    EvaluateParams = 3
-    Complete = 4
+    Complete = 3
+
+    @staticmethod
+    def to_string(code):
+        if code == MessageCode.ParameterRequest:
+            return 'ParameterRequest'
+        elif code == MessageCode.GradientUpdate:
+            return 'GradientUpdate'
+        elif code == MessageCode.ParameterUpdate:
+            return 'ParameterUpdate'
+        elif code == MessageCode.Complete:
+            return 'Complete'
+        else:
+            return 'Error'
 
 
 class MessageListener(Thread):
@@ -62,8 +74,11 @@ def send_message(message_code, payload, dst=0):
     Concatenates both the message code and destination with the payload into a single tensor and then sends that as a tensor
     """
     _LOGGER.info("SENDING MESSAGE: {} RANK: {}".format(message_code, dist.get_rank()))
-    with tracer.start_active_span('send'):
+    with tracer.start_active_span('send') as scope:
         m_parameter = torch.Tensor([dist.get_rank(), message_code.value])
         m_parameter = torch.cat((m_parameter, payload))
+        scope.span.set_tag('type', MessageCode.to_string(message_code))
+        scope.span.set_tag('size', m_parameter.element_size() * m_parameter.nelement())
+        scope.span.set_tag('worker', dist.get_rank())
         # Temporarily use synchronous sending here
         dist.send(tensor=m_parameter, dst=dst)

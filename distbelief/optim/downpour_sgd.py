@@ -1,5 +1,6 @@
 import logging
 import torch
+import torch.distributed as dist
 from torch.optim.optimizer import Optimizer, required
 from distbelief.utils.serialization import ravel_model_params, unravel_model_params
 from distbelief.utils.messaging import MessageCode, MessageListener, send_message
@@ -16,7 +17,10 @@ class DownpourListener(MessageListener):
     def receive(self, sender, message_code, parameter):
         """receive parameter updates from the server and reflect them into the client's model."""
         _LOGGER.info("Processing message: {}".format(message_code.name))
-        with tracer.start_active_span('local update', child_of=self.span_ctx):
+        with tracer.start_active_span('local update', child_of=self.span_ctx) as scope:
+            scope.span.set_tag('type', MessageCode.to_string(message_code))
+            scope.span.set_tag('size', parameter.element_size() * parameter.nelement())
+            scope.span.set_tag('worker', dist.get_rank())
             if message_code == MessageCode.ParameterUpdate:
                 unravel_model_params(self.model, parameter)
             elif message_code == MessageCode.Complete:

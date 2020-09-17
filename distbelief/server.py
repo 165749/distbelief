@@ -17,13 +17,15 @@ class ParameterServer(MessageListener):
         _LOGGER.info("Creating ParameterServer")
         # By default grads=False in ravel_model_params(), meaning that will only return parameter.data here
         self.parameter_shard = torch.rand(ravel_model_params(model).numel())
-        self.model = model
         self.active_worker = active_worker
         #init superclass
         super().__init__(model)
 
     def receive(self, sender, message_code, parameter):
-        with tracer.start_active_span('receive'):
+        with tracer.start_active_span('receive') as scope:
+            scope.span.set_tag('type', MessageCode.to_string(message_code))
+            scope.span.set_tag('size', parameter.element_size() * parameter.nelement())
+            scope.span.set_tag('worker', sender)
             print("Processing message: {} from sender {}".format(message_code.name, sender))
 
             if message_code == MessageCode.ParameterUpdate:
