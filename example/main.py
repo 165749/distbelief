@@ -81,14 +81,17 @@ def main(args):
                         optimizer.zero_grad()
                         # forward + backward + optimize
                         outputs = net(inputs)
+
+                    with tracer.start_active_span('loss'):
+                        loss = F.cross_entropy(outputs, labels)
                     with tracer.start_active_span('Backward'):
-                        with tracer.start_active_span('loss'):
-                            loss = F.cross_entropy(outputs, labels)
-                        with tracer.start_active_span('calculate gradient'):
-                            loss.backward()
-                        optimizer.step()
+                        loss.backward()
+                    optimizer.step()
 
                     _, predicted = torch.max(outputs, 1)
+                    if args.cuda:
+                        labels = labels.view(-1).cpu().numpy()
+                        predicted = predicted.view(-1).cpu().numpy()
                     accuracy = accuracy_score(predicted, labels)
 
                     log_obj = {
@@ -147,6 +150,10 @@ def evaluate(net, testloader, args, verbose=False):
             outputs = net(images)
             _, predicted = torch.max(outputs, 1)
             test_loss += F.cross_entropy(outputs, labels).item()
+
+    if args.cuda:
+        labels = labels.view(-1).cpu().numpy()
+        predicted = predicted.view(-1).cpu().numpy()
 
     test_accuracy = accuracy_score(predicted, labels)
     if verbose:
