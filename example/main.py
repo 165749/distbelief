@@ -57,7 +57,7 @@ def main(args):
     if args.no_distributed:
         optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.0)
     else:
-        optimizer = DownpourSGD(net.parameters(), lr=args.lr, n_push=args.num_push, n_pull=args.num_pull, model=net)
+        optimizer = DownpourSGD(net.parameters(), lr=args.lr, model=net)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1, verbose=True, min_lr=1e-3)
 
     # train
@@ -82,8 +82,10 @@ def main(args):
                         # forward + backward + optimize
                         outputs = net(inputs)
                     with tracer.start_active_span('Backward'):
-                        loss = F.cross_entropy(outputs, labels)
-                        loss.backward()
+                        with tracer.start_active_span('loss'):
+                            loss = F.cross_entropy(outputs, labels)
+                        with tracer.start_active_span('calculate gradient'):
+                            loss.backward()
                         optimizer.step()
 
                     _, predicted = torch.max(outputs, 1)
@@ -109,7 +111,7 @@ def main(args):
         val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
         scheduler.step(val_loss)
 
-    # Stop listener
+    # Stop training
     optimizer.stop()
 
     df = pd.DataFrame(logs)
@@ -166,8 +168,6 @@ if __name__ == "__main__":
     parser.add_argument('--test-batch-size', type=int, default=10000, metavar='N', help='input batch size for testing (default: 10000)')
     parser.add_argument('--epochs', type=int, default=20, metavar='N', help='number of epochs to train (default: 20)')
     parser.add_argument('--lr', type=float, default=0.1, metavar='LR', help='learning rate (default: 0.1)')
-    parser.add_argument('--num-pull', type=int, default=1, metavar='N', help='how often to pull params (default: 1)')
-    parser.add_argument('--num-push', type=int, default=1, metavar='N', help='how often to push grads (default: 1)')
     parser.add_argument('--cuda', action='store_true', default=False, help='use CUDA for training')
     parser.add_argument('--log-interval', type=int, default=50, metavar='N', help='how often to evaluate and print out')
     parser.add_argument('--no-distributed', action='store_true', default=False, help='whether to use DownpourSGD or normal SGD')

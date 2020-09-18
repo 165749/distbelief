@@ -3,57 +3,34 @@ import torch
 import torch.distributed as dist
 from torch.optim.optimizer import Optimizer, required
 from distbelief.utils.serialization import ravel_model_params, unravel_model_params
-from distbelief.utils.messaging import MessageCode, MessageListener, send_message
+from distbelief.utils.messaging import send_message
 from distbelief.utils.tracer import tracer
 
 _LOGGER = logging.getLogger(__name__)
 
-class DownpourListener(MessageListener):
-    """DownpourListener"""
-    def __init__(self, model, span_ctx):
-        self.span_ctx = span_ctx
-        super().__init__(model)
-
-    def receive(self, sender, message_code, parameter):
-        """receive parameter updates from the server and reflect them into the client's model."""
-        _LOGGER.info("Processing message: {}".format(message_code.name))
-        with tracer.start_active_span('local update', child_of=self.span_ctx) as scope:
-            scope.span.set_tag('type', MessageCode.to_string(message_code))
-            scope.span.set_tag('size', parameter.element_size() * parameter.nelement())
-            scope.span.set_tag('worker', dist.get_rank())
-            if message_code == MessageCode.ParameterUpdate:
-                unravel_model_params(self.model, parameter)
-            elif message_code == MessageCode.Complete:
-                self.stop()
 
 class DownpourSGD(Optimizer):
     """DownpourSGD"""
 
-    def __init__(self, params, lr=required, n_push=required, n_pull=required, model=required):
+    def __init__(self, params, lr=required, model=required):
         """__init__
 
         :param params:
         :param lr:
-        :param freq:
         :param model:
         """
         if lr is not required and lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
 
         defaults = dict(lr=lr,)
-        self.gradients_shape = ravel_model_params(model).size()
-        self.accumulated_gradients = torch.zeros(self.gradients_shape)
-        self.n_pull = n_pull
-        self.n_push = n_push
-
+        self.gradients_shape = ravel_model_params(model).numel()
+        self.gradients_buffer = torch.zeros(self.gradients_shape)
         self.model = model
-        # this sets the initial model parameters
-        send_message(MessageCode.ParameterUpdate, ravel_model_params(self.model))
-        self.idx = 0
 
-        # Pass tracing span to listener thread
-        self.listener_thread = DownpourListener(self.model, tracer.scope_manager.active.span)
-        self.listener_thread.start()
+        # Send a empty gradients to fetch the initial model from the server
+        send_message(self.gradients_buffer)
+        dist.recv(tensor=self.gradients_buffer)
+        unravel_model_params(self.model, self.gradients_buffer)
 
         super(DownpourSGD, self).__init__(params, defaults)
 
@@ -67,38 +44,30 @@ class DownpourSGD(Optimizer):
         loss = None
         if closure is not None:
             loss = closure()
-        
-        # send parameter request every N iterations
-        if self.idx % self.n_pull == 0:
-            # TODO (zhuojin): dummy val for the second argument
-            send_message(MessageCode.ParameterRequest, torch.zeros(self.gradients_shape))
-            # will update model.parameter.data received from the server in another thread concurrently
 
-        #get the lr
-        lr = self.param_groups[0]['lr']
-        # keep track of accumulated gradients so that we can send 
-        gradients = ravel_model_params(self.model, grads=True)  # Return model.parameter.grad
-        self.accumulated_gradients.add_(gradients * (-lr))
+        # Collect gradients from self.model
+        gradients = ravel_model_params(self.model, grads=True)
 
-        # send gradient update every N iterations
-        if self.idx % self.n_push == 0:
-            send_message(MessageCode.GradientUpdate, self.accumulated_gradients) # send gradients to the server
-            self.accumulated_gradients.zero_()
+        with tracer.start_active_span('multiply -lr'):
+            # Multiple gradients by learning rate
+            gradients = gradients * (-self.param_groups[0]['lr'])
+        # Send gradients to the server
+        send_message(gradients)
 
-        # internal sgd update
-        for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                d_p = p.grad.data
-                p.data.add_(d_p * (-group['lr']))
-                # NOTE: the parameters updated here will also affect self.model
-        
-        self.idx += 1
+        # Will pull parameters from the server, so no need to update internal parameters
+
+        # Wait the server to send back the updated model
+        dist.recv(tensor=self.gradients_buffer)
+        with tracer.start_active_span('local update') as scope:
+            scope.span.set_tag('size', self.gradients_buffer.element_size() * self.gradients_buffer.nelement())
+            scope.span.set_tag('worker', dist.get_rank())
+            # Update parameters in self.model
+            unravel_model_params(self.model, self.gradients_buffer)
+
         return loss
 
     def stop(self):
-        # Inform the server about completion
-        # TODO (zhuojin): dummy val for the second argument
-        send_message(MessageCode.Complete, torch.zeros(self.gradients_shape))
-        self.listener_thread.join()
+        # Inform the server about completion (by setting tensor[0] to inf)
+        tensor = torch.zeros(self.gradients_shape)
+        tensor[0] = float('inf')
+        send_message(tensor)
