@@ -23,14 +23,21 @@ class DownpourSGD(Optimizer):
             raise ValueError("Invalid learning rate: {}".format(lr))
 
         defaults = dict(lr=lr,)
-        self.gradients_shape = ravel_model_params(model).numel()
-        self.gradients_buffer = torch.zeros(self.gradients_shape)
         self.model = model
 
         # Send a empty gradients to fetch the initial model from the server
-        send_message(self.gradients_buffer)
-        dist.recv(tensor=self.gradients_buffer)
-        unravel_model_params(self.model, self.gradients_buffer)
+        # Send gradients to the server layer by layer
+        for para in self.model.parameters():
+            with tracer.start_active_span('send') as scope:
+                scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                scope.span.set_tag('worker', dist.get_rank())
+                dist.send(torch.zeros(para.data.size()), 0)
+        # Wait the server to send back the updated model
+        for para in self.model.parameters():
+            with tracer.start_active_span('recv') as scope:
+                scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                scope.span.set_tag('worker', dist.get_rank())
+                dist.recv(para.data)
 
         super(DownpourSGD, self).__init__(params, defaults)
 
@@ -45,29 +52,31 @@ class DownpourSGD(Optimizer):
         if closure is not None:
             loss = closure()
 
-        # Collect gradients from self.model
-        gradients = ravel_model_params(self.model, grads=True)
-
-        with tracer.start_active_span('multiply -lr'):
-            # Multiple gradients by learning rate
-            gradients = gradients * (-self.param_groups[0]['lr'])
-        # Send gradients to the server
-        send_message(gradients)
+        # Learning rate
+        lr = -self.param_groups[0]['lr']
+        # Send gradients to the server layer by layer
+        with tracer.start_active_span('send'):
+            for i, para in enumerate(self.model.parameters()):
+                with tracer.start_active_span('layer {}'.format(i)) as scope:
+                    scope.span.set_tag('size', para.grad.nelement() * para.grad.element_size())
+                    scope.span.set_tag('worker', dist.get_rank())
+                    dist.send(lr * para.grad, 0)
 
         # Will pull parameters from the server, so no need to update internal parameters
 
         # Wait the server to send back the updated model
-        dist.recv(tensor=self.gradients_buffer)
-        with tracer.start_active_span('local update') as scope:
-            scope.span.set_tag('size', self.gradients_buffer.element_size() * self.gradients_buffer.nelement())
-            scope.span.set_tag('worker', dist.get_rank())
-            # Update parameters in self.model
-            unravel_model_params(self.model, self.gradients_buffer)
+        with tracer.start_active_span('recv'):
+            for i, para in enumerate(self.model.parameters()):
+                with tracer.start_active_span('layer {}'.format(i)) as scope:
+                    scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                    scope.span.set_tag('worker', dist.get_rank())
+                    dist.recv(para.data)
 
         return loss
 
     def stop(self):
         # Inform the server about completion (by setting tensor[0] to inf)
-        tensor = torch.zeros(self.gradients_shape)
-        tensor[0] = float('inf')
+        tensor = torch.zeros(list(self.model.parameters())[0].data.size())
+        # TODO (zhuojin): Fix hardcoded
+        tensor[0][0][0][0] = float('inf')
         send_message(tensor)

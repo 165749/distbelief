@@ -5,6 +5,7 @@ Parameter server for distbelief
 import logging
 import torch
 import torch.optim
+import torch.distributed as dist
 from distbelief.utils.messaging import MessageListener, send_message
 from distbelief.utils.serialization import ravel_model_params, unravel_model_params
 from distbelief.utils.tracer import tracer
@@ -16,26 +17,30 @@ class ParameterServer(MessageListener):
     """ParameterServer"""
     def __init__(self, model, active_worker):
         _LOGGER.info("Creating ParameterServer")
-        # By default grads=False in ravel_model_params(), meaning that will only return parameter.data here
-        self.parameter_shard = ravel_model_params(model)
-        self.active_worker = active_worker
+        self.global_model = [para.data for para in model.parameters()]
+        self.gradient_buffers = [torch.zeros(para.data.size()) for para in model.parameters()]
+        self.active_worker = [i for i in range(1, active_worker+1)]
         # Init superclass
         super().__init__(model)
 
-    def receive(self, sender, parameter):
-        with tracer.start_active_span('receive') as scope:
-            scope.span.set_tag('size', parameter.element_size() * parameter.nelement())
-            scope.span.set_tag('worker', sender)
-            print("Processing message from sender {}".format(sender))
+    def receive(self):
+        for worker in self.active_worker.copy():
+            for i, buffer in enumerate(self.gradient_buffers):
+                with tracer.start_active_span('recv') as scope:
+                    scope.span.set_tag('size', buffer.nelement() * buffer.element_size())
+                    dist.recv(tensor=buffer, src=worker)
+                    # TODO (zhuojin): Fix hardcoded
+                    if i == 0 and buffer[0][0][0][0] == float('inf'):
+                        self.active_worker.remove(worker)
+                        break
+                    with tracer.start_active_span('add'):
+                        self.global_model[i].add(buffer)
+            else:
+                with tracer.start_active_span('send'):
+                    for i, para in enumerate(self.global_model):
+                        with tracer.start_active_span('layer {}'.format(i)) as scope:
+                            scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                            dist.send(para.data, dst=worker)
 
-            if parameter[0] == float('inf'):
-                # Notified when a worker is complete
-                self.active_worker -= 1
-                if self.active_worker == 0:
-                    self.stop()
-                return
-
-            with tracer.start_active_span('update'):
-                self.parameter_shard.add_(parameter)
-            # Send the current model back to the sender
-            send_message(self.parameter_shard, dst=sender)
+        if len(self.active_worker) == 0:
+            self.stop()

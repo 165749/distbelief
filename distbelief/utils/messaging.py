@@ -22,10 +22,9 @@ class MessageListener(Thread):
         self.model = model
         self.running = True
         _LOGGER.info("Setting m_parameter")
-        self.m_parameter = torch.zeros(ravel_model_params(model).numel())
         super(MessageListener, self).__init__()
 
-    def receive(self, sender, parameter):
+    def receive(self):
         """receive
 
         :param sender: rank id of the sender
@@ -38,8 +37,7 @@ class MessageListener(Thread):
         self.running = True
         while self.running:
             _LOGGER.info("Polling for message...")
-            sender = dist.recv(tensor=self.m_parameter)
-            self.receive(sender, self.m_parameter)
+            self.receive()
 
     def stop(self):
         self.running = False
