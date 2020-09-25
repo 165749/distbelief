@@ -25,22 +25,24 @@ class ParameterServer(MessageListener):
 
     def receive(self):
         for worker in self.active_worker.copy():
-            for i, buffer in enumerate(self.gradient_buffers):
+            # Receive gradients in the reverse order
+            for i in range(len(self.gradient_buffers)-1, -1, -1):
+                buffer = self.gradient_buffers[i]
                 with tracer.start_active_span('recv') as scope:
                     scope.span.set_tag('size', buffer.nelement() * buffer.element_size())
                     dist.recv(tensor=buffer, src=worker)
                     # TODO (zhuojin): Fix hardcoded
-                    if i == 0 and buffer[0][0][0][0] == float('inf'):
+                    if i == len(self.gradient_buffers)-1 and buffer[0] == float('inf'):
                         self.active_worker.remove(worker)
                         break
                     with tracer.start_active_span('add'):
-                        self.global_model[i].add(buffer)
+                        self.global_model[i].add_(buffer)
             else:
                 with tracer.start_active_span('send'):
                     for i, para in enumerate(self.global_model):
                         with tracer.start_active_span('layer {}'.format(i)) as scope:
-                            scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
-                            dist.send(para.data, dst=worker)
+                            scope.span.set_tag('size', para.nelement() * para.element_size())
+                            dist.send(para, dst=worker)
 
         if len(self.active_worker) == 0:
             self.stop()

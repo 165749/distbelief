@@ -18,6 +18,7 @@ import pandas as pd
 
 import torch.optim as optim
 from distbelief.optim import DownpourSGD
+from distbelief.optim.downpour_sgd import build_distributed_model
 from distbelief.server import ParameterServer
 from distbelief.utils.tracer import tracer, numbers_to_trace_context, trace_context_to_numbers
 from opentracing.propagation import Format
@@ -45,14 +46,18 @@ def main(args):
     logs = []
 
     transform = transforms.Compose([
-                transforms.Resize(64),  # For Alexnet
+                # transforms.Resize(64),  # For torchvision.models.alexnet
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
             ])
 
     trainloader, testloader = get_dataset(args, transform)
-    # net = AlexNet()
-    net = torchvision.models.alexnet(num_classes=10)
+
+    if args.no_distributed:
+        net = AlexNet()
+    else:
+        net = build_distributed_model(AlexNet, lr=args.lr, cuda=args.cuda)()
+        # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
 
     if args.no_distributed:
         optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.0)
@@ -76,16 +81,22 @@ def main(args):
                     if args.cuda:
                         inputs, labels = inputs.cuda(), labels.cuda()
 
-                    with tracer.start_active_span('Forward'):
+                    with tracer.start_active_span('Forward') as scope:
                         # zero the parameter gradients
                         optimizer.zero_grad()
+
+                        net.init_tracer_span(scope.span)
                         # forward + backward + optimize
                         outputs = net(inputs)
+                        net.finish_tracer_span()
 
                     with tracer.start_active_span('loss'):
                         loss = F.cross_entropy(outputs, labels)
-                    with tracer.start_active_span('Backward'):
+                    with tracer.start_active_span('Backward') as scope:
+                        net.reset_senders()
+                        net.init_tracer_span(scope.span)
                         loss.backward()
+                        net.finish_tracer_span()
                     optimizer.step()
 
                     _, predicted = torch.max(outputs, 1)
@@ -138,7 +149,10 @@ def evaluate(net, testloader, args, verbose=False):
     else:
         classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
     net.eval()
-   
+
+    # Temporarily remove hooks for evaluation
+    net.remove_hooks()
+
     test_loss = 0
     with torch.no_grad():
         for data in testloader:
@@ -160,12 +174,15 @@ def evaluate(net, testloader, args, verbose=False):
         print('Loss: {:.3f}'.format(test_loss))
         print('Accuracy: {:.3f}'.format(test_accuracy))
         print(classification_report(predicted, labels, target_names=classes))
-    
+
+    # Restore hooks
+    net.register_hooks()
+
     return test_loss, test_accuracy
 
 def init_server():
-    # model = AlexNet()
-    model = torchvision.models.alexnet(num_classes=10)
+    model = AlexNet()
+    # model = torchvision.models.resnet50(num_classes=10)
     server = ParameterServer(model=model, active_worker=args.world_size-1)
     server.run()
 

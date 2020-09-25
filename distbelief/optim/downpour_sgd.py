@@ -1,5 +1,6 @@
 import logging
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 from torch.optim.optimizer import Optimizer, required
 from distbelief.utils.serialization import ravel_model_params, unravel_model_params
@@ -7,6 +8,129 @@ from distbelief.utils.messaging import send_message
 from distbelief.utils.tracer import tracer
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def build_distributed_model(model, lr, cuda=False):
+    class DistributedModel(model):
+        def __init__(self, *args, **kwargs):
+            super(DistributedModel, self).__init__(*args, **kwargs)
+            self.gradients_buffer = []  # TODO (zhuojin): Remove gradients buffers
+            self.parameters_generator = self.parameters()
+            self.parameters_buffer = []  # For receivers collecting model parameters
+            self.senders = []
+            self.receivers = []
+            self.current_receiver = 0
+            self.span = None
+            self.root_span = None
+            self.hooks = []
+            self.register_hooks()
+            for para in self.parameters():
+                self.parameters_buffer.append(torch.zeros(para.data.size()))
+
+            # Send a empty gradients to fetch the initial model from the server
+            # Send gradients to the server layer by layer
+            with tracer.start_active_span('init'):
+                for para in reversed(list(self.parameters())):
+                    with tracer.start_active_span('send') as scope:
+                        scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                        scope.span.set_tag('worker', dist.get_rank())
+                        dist.send(torch.zeros(para.data.size()), 0)
+            self.reset_and_start_receivers()
+
+        def register_hooks(self):
+            print('Register hooks!')
+            for layer in self.modules():
+                hook = layer.register_forward_pre_hook(self.forward_pre_hook_fn)
+                self.hooks.append(hook)
+                hook = layer.register_backward_hook(self.backward_hook_fn)
+                self.hooks.append(hook)
+
+        def remove_hooks(self):
+            print('Remove hooks!')
+            for hook in self.hooks:
+                hook.remove()
+
+        def init_tracer_span(self, root_span):
+            self.root_span = root_span
+            self.span = tracer.start_span('layer', child_of=root_span)
+
+        def finish_tracer_span(self):
+            self.span.finish()
+
+        def reset_senders(self):
+            self.senders = []
+            self.gradients_buffer = []
+
+        def send(self, tensor):
+            with tracer.start_active_span('send', child_of=self.span) as scope:
+                scope.span.set_tag('size', tensor.nelement() * tensor.element_size())
+                scope.span.set_tag('worker', dist.get_rank())
+                sender = dist.isend(tensor, 0)
+                self.senders.append(sender)
+            self.gradients_buffer.append(tensor)
+
+        def wait_all_senders(self):
+            for i, sender in enumerate(self.senders):
+                sender.wait()
+
+        def reset_and_start_receivers(self):
+            self.parameters_generator = self.parameters()  # Reset generator
+            self.receivers = []
+            self.current_receiver = 0
+            for para in self.parameters_buffer:
+                receiver = dist.irecv(para, 0)
+                self.receivers.append(receiver)
+
+        def wait_receiver(self):
+            with tracer.start_active_span('recv', child_of=self.span) as scope:
+                self.receivers[self.current_receiver].wait()
+                scope.span.set_tag('size', self.parameters_buffer[self.current_receiver].nelement() *
+                                   self.parameters_buffer[self.current_receiver].element_size())
+                scope.span.set_tag('worker', dist.get_rank())
+                para = next(self.parameters_generator)
+                if cuda:
+                    para.data = self.parameters_buffer[self.current_receiver].cuda()
+                else:
+                    para.data = self.parameters_buffer[self.current_receiver]
+                self.current_receiver += 1
+
+        def forward_pre_hook_fn(self, module, input):
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear) or isinstance(module, nn.BatchNorm2d):
+                self.wait_receiver()
+                if module.bias is not None:
+                    self.wait_receiver()
+            self.span.finish()
+            self.span = tracer.start_span('layer', child_of=self.root_span)
+
+        def backward_hook_fn(self, module, input, output):
+            weight = None
+            bias = None
+            if isinstance(module, nn.Conv2d):
+                weight = input[1]
+                # Note: For GPU training, the argument input will only contain bias if bias=True for nn.Conv2d,
+                # which is caused by a well-known issue of backward hooks in PyTorch. To bypass the issue, needs
+                # to disable all the bias of nn.Conv2d in the model.
+                if not cuda:
+                    bias = input[2]
+            elif isinstance(module, nn.BatchNorm2d):
+                weight = input[1]
+                bias = input[2]
+            elif isinstance(module, nn.Linear):
+                weight = input[2].t()
+                bias = input[0]
+            # Reverse order in the backward
+            if bias is not None:
+                grad = (-lr) * bias
+                grad = grad.cpu()
+                self.send(grad)
+            if weight is not None:
+                grad = (-lr) * weight
+                grad = grad.cpu()
+                self.send(grad)
+            self.span.finish()
+            self.span = tracer.start_span('layer', child_of=self.root_span)
+
+    return DistributedModel
 
 
 class DownpourSGD(Optimizer):
@@ -25,20 +149,6 @@ class DownpourSGD(Optimizer):
         defaults = dict(lr=lr,)
         self.model = model
 
-        # Send a empty gradients to fetch the initial model from the server
-        # Send gradients to the server layer by layer
-        for para in self.model.parameters():
-            with tracer.start_active_span('send') as scope:
-                scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
-                scope.span.set_tag('worker', dist.get_rank())
-                dist.send(torch.zeros(para.data.size()), 0)
-        # Wait the server to send back the updated model
-        for para in self.model.parameters():
-            with tracer.start_active_span('recv') as scope:
-                scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
-                scope.span.set_tag('worker', dist.get_rank())
-                dist.recv(para.data)
-
         super(DownpourSGD, self).__init__(params, defaults)
 
     def step(self, closure=None):
@@ -52,6 +162,7 @@ class DownpourSGD(Optimizer):
         if closure is not None:
             loss = closure()
 
+        ''' Synchronous send
         # Learning rate
         lr = -self.param_groups[0]['lr']
         # Send gradients to the server layer by layer
@@ -61,9 +172,12 @@ class DownpourSGD(Optimizer):
                     scope.span.set_tag('size', para.grad.nelement() * para.grad.element_size())
                     scope.span.set_tag('worker', dist.get_rank())
                     dist.send(lr * para.grad, 0)
+        '''
+        self.model.wait_all_senders()
 
         # Will pull parameters from the server, so no need to update internal parameters
 
+        '''Synchronous recv
         # Wait the server to send back the updated model
         with tracer.start_active_span('recv'):
             for i, para in enumerate(self.model.parameters()):
@@ -71,12 +185,14 @@ class DownpourSGD(Optimizer):
                     scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
                     scope.span.set_tag('worker', dist.get_rank())
                     dist.recv(para.data)
+        '''
+        self.model.reset_and_start_receivers()
 
         return loss
 
     def stop(self):
         # Inform the server about completion (by setting tensor[0] to inf)
-        tensor = torch.zeros(list(self.model.parameters())[0].data.size())
+        tensor = torch.zeros(list(self.model.parameters())[-1].data.size())
         # TODO (zhuojin): Fix hardcoded
-        tensor[0][0][0][0] = float('inf')
+        tensor[0] = float('inf')
         send_message(tensor)

@@ -13,7 +13,7 @@ def init_tracer(service):
                 'type': 'const',
                 'param': 1,
             },
-            'logging': True,
+            'logging': False,
         },
         service_name=service,
     )
