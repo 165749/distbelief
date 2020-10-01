@@ -14,7 +14,6 @@ def build_distributed_model(model, lr, cuda=False):
     class DistributedModel(model):
         def __init__(self, *args, **kwargs):
             super(DistributedModel, self).__init__(*args, **kwargs)
-            self.gradients_buffer = []  # TODO (zhuojin): Remove gradients buffers
             self.parameters_generator = self.parameters()
             self.parameters_buffer = []  # For receivers collecting model parameters
             self.senders = []
@@ -26,14 +25,19 @@ def build_distributed_model(model, lr, cuda=False):
             self.register_hooks()
             for para in self.parameters():
                 self.parameters_buffer.append(torch.zeros(para.data.size()))
+            for name, module in self.named_modules():
+                module.name = name
 
             # Send a empty gradients to fetch the initial model from the server
             # Send gradients to the server layer by layer
             with tracer.start_active_span('init'):
-                for para in reversed(list(self.parameters())):
+                for name, para in reversed(list(self.named_parameters())):
                     with tracer.start_active_span('send') as scope:
                         scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
                         scope.span.set_tag('worker', dist.get_rank())
+                        name = name.rsplit('.', maxsplit=1)
+                        scope.span.set_tag('layer', name[0])
+                        scope.span.set_tag('type', name[1])
                         dist.send(torch.zeros(para.data.size()), 0)
             self.reset_and_start_receivers()
 
@@ -59,15 +63,15 @@ def build_distributed_model(model, lr, cuda=False):
 
         def reset_senders(self):
             self.senders = []
-            self.gradients_buffer = []
 
-        def send(self, tensor):
+        def send(self, tensor, layer, type):
             with tracer.start_active_span('send', child_of=self.span) as scope:
                 scope.span.set_tag('size', tensor.nelement() * tensor.element_size())
                 scope.span.set_tag('worker', dist.get_rank())
+                scope.span.set_tag('layer', layer)
+                scope.span.set_tag('type', type)
                 sender = dist.isend(tensor, 0)
                 self.senders.append(sender)
-            self.gradients_buffer.append(tensor)
 
         def wait_all_senders(self):
             for i, sender in enumerate(self.senders):
@@ -83,6 +87,7 @@ def build_distributed_model(model, lr, cuda=False):
 
         def wait_receiver(self):
             with tracer.start_active_span('recv', child_of=self.span) as scope:
+                size = self.parameters_buffer[self.current_receiver].nelement() * self.parameters_buffer[self.current_receiver].element_size()
                 self.receivers[self.current_receiver].wait()
                 scope.span.set_tag('size', self.parameters_buffer[self.current_receiver].nelement() *
                                    self.parameters_buffer[self.current_receiver].element_size())
@@ -95,14 +100,17 @@ def build_distributed_model(model, lr, cuda=False):
                 self.current_receiver += 1
 
         def forward_pre_hook_fn(self, module, input):
+            self.span.finish()
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear) or isinstance(module, nn.BatchNorm2d):
                 self.wait_receiver()
                 if module.bias is not None:
                     self.wait_receiver()
-            self.span.finish()
-            self.span = tracer.start_span('layer', child_of=self.root_span)
+            self.span = tracer.start_span('compute', child_of=self.root_span)
+            self.span.set_tag('layer', module.name)
 
         def backward_hook_fn(self, module, input, output):
+            self.span.set_tag('layer', module.name)
+            self.span.finish()
             weight = None
             bias = None
             if isinstance(module, nn.Conv2d):
@@ -120,15 +128,18 @@ def build_distributed_model(model, lr, cuda=False):
                 bias = input[0]
             # Reverse order in the backward
             if bias is not None:
-                grad = (-lr) * bias
-                grad = grad.cpu()
-                self.send(grad)
+                with tracer.start_active_span('lr', child_of=self.root_span):
+                    grad = (-lr) * bias
+                with tracer.start_active_span('copy', child_of=self.root_span):
+                    grad = grad.cpu()
+                self.send(grad, module.name, 'bias')
             if weight is not None:
-                grad = (-lr) * weight
-                grad = grad.cpu()
-                self.send(grad)
-            self.span.finish()
-            self.span = tracer.start_span('layer', child_of=self.root_span)
+                with tracer.start_active_span('lr', child_of=self.root_span):
+                    grad = (-lr) * weight
+                with tracer.start_active_span('copy', child_of=self.root_span):
+                    grad = grad.cpu()
+                self.send(grad, module.name, 'weight')
+            self.span = tracer.start_span('compute', child_of=self.root_span)
 
     return DistributedModel
 
@@ -195,4 +206,7 @@ class DownpourSGD(Optimizer):
         tensor = torch.zeros(list(self.model.parameters())[-1].data.size())
         # TODO (zhuojin): Fix hardcoded
         tensor[0] = float('inf')
-        send_message(tensor)
+        with tracer.start_active_span('send') as scope:
+            scope.span.set_tag('size', tensor.element_size() * tensor.nelement())
+            scope.span.set_tag('worker', dist.get_rank())
+            dist.send(tensor, 0)
