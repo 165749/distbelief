@@ -1,7 +1,5 @@
 import os
-import logging 
 import argparse
-import csv
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -72,33 +70,37 @@ def main(args):
 
     for epoch in range(args.epochs):  # loop over the dataset multiple times
         print("Training for epoch {}".format(epoch))
-        with tracer.start_active_span('Epoch {}'.format(epoch)):
-            for i, data in enumerate(trainloader, 0):
-                with tracer.start_active_span('Step {}'.format(i)):
-                    # get the inputs
-                    inputs, labels = data
+        for i, data in enumerate(trainloader, 0):
+            print('step {}'.format(i))
+            with tracer.start_active_span('Epoch {} Step {}'.format(epoch, i)):
+                # Inform server starting next step (i.e., starting pushing the model to the worker)
+                net.step_begin()
 
-                    if args.cuda:
-                        inputs, labels = inputs.cuda(), labels.cuda()
+                inputs, labels = data
 
-                    with tracer.start_active_span('Forward') as scope:
-                        # zero the parameter gradients
-                        optimizer.zero_grad()
+                if args.cuda:
+                    inputs, labels = inputs.cuda(), labels.cuda()
 
-                        net.init_tracer_span(scope.span)
-                        # forward + backward + optimize
-                        outputs = net(inputs)
-                        net.finish_tracer_span()
+                with tracer.start_active_span('Zero_grad'):
+                    # Clear the parameter gradients
+                    optimizer.zero_grad()
 
-                    with tracer.start_active_span('loss'):
-                        loss = F.cross_entropy(outputs, labels)
-                    with tracer.start_active_span('Backward') as scope:
-                        net.reset_senders()
-                        net.init_tracer_span(scope.span)
-                        loss.backward()
-                        net.finish_tracer_span()
-                    optimizer.step()
+                with tracer.start_active_span('Forward') as scope:
+                    net.init_tracer_span(scope.span)
+                    outputs = net(inputs)
+                    net.finish_tracer_span()
 
+                with tracer.start_active_span('loss'):
+                    loss = F.cross_entropy(outputs, labels)
+
+                with tracer.start_active_span('Backward') as scope:
+                    net.reset_senders()
+                    net.init_tracer_span(scope.span)
+                    loss.backward()
+                    net.finish_tracer_span()
+                optimizer.step()
+
+                if i % args.log_interval == 0 and i > 0:    # print every n mini-batches
                     _, predicted = torch.max(outputs, 1)
                     if args.cuda:
                         labels = labels.view(-1).cpu().numpy()
@@ -112,14 +114,13 @@ def main(args):
                         'training_accuracy': accuracy,
                     }
 
-                    if i % args.log_interval == 0 and i > 0:    # print every n mini-batches
-                        log_obj['test_loss'], log_obj['test_accuracy'] = evaluate(net, testloader, args)
-                        print("Timestamp: {timestamp} | "
-                              "Iteration: {iteration:6} | "
-                              "Loss: {training_loss:6.4f} | "
-                              "Accuracy : {training_accuracy:6.4f} | "
-                              "Test Loss: {test_loss:6.4f} | "
-                              "Test Accuracy: {test_accuracy:6.4f}".format(**log_obj))
+                    log_obj['test_loss'], log_obj['test_accuracy'] = evaluate(net, testloader, args)
+                    print("Timestamp: {timestamp} | "
+                          "Iteration: {iteration:6} | "
+                          "Loss: {training_loss:6.4f} | "
+                          "Accuracy : {training_accuracy:6.4f} | "
+                          "Test Loss: {test_loss:6.4f} | "
+                          "Test Accuracy: {test_accuracy:6.4f}".format(**log_obj))
                     logs.append(log_obj)
 
         val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
@@ -180,11 +181,6 @@ def evaluate(net, testloader, args, verbose=False):
 
     return test_loss, test_accuracy
 
-def init_server():
-    model = AlexNet()
-    # model = torchvision.models.resnet50(num_classes=10)
-    server = ParameterServer(model=model, active_worker=args.world_size-1)
-    server.run()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Distbelief training example')
@@ -195,12 +191,12 @@ if __name__ == "__main__":
     parser.add_argument('--cuda', action='store_true', default=False, help='use CUDA for training')
     parser.add_argument('--log-interval', type=int, default=50, metavar='N', help='how often to evaluate and print out')
     parser.add_argument('--no-distributed', action='store_true', default=False, help='whether to use DownpourSGD or normal SGD')
-    parser.add_argument('--rank', type=int, metavar='N', help='rank of current process (0 is server, 1+ is training node)')
-    parser.add_argument('--world-size', type=int, default=3, metavar='N', help='size of the world')
+    parser.add_argument('--worker-id', type=int, default=1, metavar='N', help='rank of the current worker (starting from 1)')
+    parser.add_argument('--worker-num', type=int, default=1, metavar='N', help='number of workers in the training')
     parser.add_argument('--server', action='store_true', default=False, help='server node?')
     parser.add_argument('--dataset', type=str, default='CIFAR10', help='which dataset to train on')
     parser.add_argument('--master', type=str, default='localhost', help='ip address of the master (server) node')
-    parser.add_argument('--port', type=str, default='29500', help='port on master node to communicate with')
+    parser.add_argument('--port', type=str, default='2222', help='port on master node to communicate with')
     args = parser.parse_args()
     print(args)
 
@@ -210,25 +206,20 @@ if __name__ == "__main__":
         """
         os.environ['MASTER_ADDR'] = args.master
         os.environ['MASTER_PORT'] = args.port
-        dist.init_process_group('gloo', rank=args.rank, world_size=args.world_size)
 
         if args.server:
-            with tracer.start_active_span('distbelief') as scope:
-                span = tracer.active_span
-                context = {}
-                tracer.inject(span, Format.TEXT_MAP, context)
-                numbers = trace_context_to_numbers(context)
-                tensor = torch.from_numpy(np.array(numbers, dtype=np.int64))
-                for idx in range(1, args.world_size):
-                    dist.send(tensor=tensor, dst=idx)  # send to every worker
-                with tracer.start_active_span('server'):
-                    init_server()
+            model = AlexNet()
+            # model = torchvision.models.resnet50(num_classes=10)
+            server = ParameterServer(model=model, worker_num=args.worker_num)
+            server.run()
         else:
+            dist.init_process_group('gloo', rank=2 * args.worker_id - 1, world_size=2 * args.worker_num + 1)
+            print("worker {} initialized".format(dist.get_rank()))
             tensor = torch.zeros(4, dtype=torch.int64)  # TODO (zhuojin): Remove hard-code
             dist.recv(tensor=tensor)
             context = numbers_to_trace_context(tensor.tolist())
             span_ctx = tracer.extract(Format.TEXT_MAP, context)
-            with tracer.start_active_span('worker {}'.format(args.rank), child_of=span_ctx):
+            with tracer.start_active_span('worker {}'.format(dist.get_rank()), child_of=span_ctx):
                 main(args)
         dist.destroy_process_group()
         # Wait for trace collection
