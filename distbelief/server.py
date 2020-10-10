@@ -49,7 +49,7 @@ class ParameterServer:
     def run(self):
         threads = []
         layer_name = [name.rsplit('.', maxsplit=1) for name, _ in self.model.named_parameters()]
-        layer_shape = [para.data.size() for para in self.model.parameters()]
+        layer_shape = [list(para.data.size()) for para in self.model.parameters()]
         for server_id in range(2, 2*self.worker_num + 1, 2):
             thread = multiprocessing.Process(target=ParameterServer.receive, args=(self.global_model, layer_name, layer_shape, server_id, self.worker_num))
             thread.start()
@@ -82,6 +82,9 @@ class ParameterServer:
         # have to initialize a new tracer in the subprocess.
         Config._initialized = False
         tracer = init_tracer("distbelief")
+
+        # Note (zhuojin): A potential issue may appear after forking. Temporarily solve it by set_num_threads to 1.
+        torch.set_num_threads(1)
 
         tensor = torch.zeros(4, dtype=torch.int64)  # TODO (zhuojin): Remove hard-code
         dist.recv(tensor=tensor)

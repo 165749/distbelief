@@ -10,7 +10,9 @@ import torch.distributed as dist
 
 from datetime import datetime
 import time
-from models import LeNet, AlexNet
+from models.alexnet import AlexNet
+from models.resnet import Resnet50
+from models.inception import Inception3
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 import pandas as pd
 
@@ -43,19 +45,33 @@ def main(args):
 
     logs = []
 
-    transform = transforms.Compose([
-                # transforms.Resize(64),  # For torchvision.models.alexnet
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-            ])
+    if args.model == "alexnet":
+        transform = transforms.Compose([
+                    transforms.Resize(64),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                ])
+    else:
+        transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                ])
 
     trainloader, testloader = get_dataset(args, transform)
 
     if args.no_distributed:
         net = AlexNet()
     else:
-        net = build_distributed_model(AlexNet, lr=args.lr, cuda=args.cuda)()
-        # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
+        if args.model == "alexnet":
+            net = build_distributed_model(AlexNet, lr=args.lr, cuda=args.cuda)()
+        elif args.model == "resnet50":
+            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
+            net = build_distributed_model(Resnet50, lr=args.lr, cuda=args.cuda)(num_classes=10)
+        elif args.model == "inception3":
+            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda)(num_classes=10)
+            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda)(num_classes=10)
+        else:
+            raise Exception("Not implemented yet: {}".format(args.model))
 
     if args.no_distributed:
         optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.0)
@@ -68,6 +84,7 @@ def main(args):
     if args.cuda:
         net = net.cuda()
 
+    steps_per_epoch = len(trainloader)
     for epoch in range(args.epochs):  # loop over the dataset multiple times
         print("Training for epoch {}".format(epoch))
         for i, data in enumerate(trainloader, 0):
@@ -100,7 +117,9 @@ def main(args):
                     net.finish_tracer_span()
                 optimizer.step()
 
-                if i % args.log_interval == 0 and i > 0:    # print every n mini-batches
+                if args.num_batches > 0 and epoch * steps_per_epoch + i + 1 >= args.num_batches:
+                    break
+                if args.log_interval > 0 and i % args.log_interval == 0 and i > 0:
                     _, predicted = torch.max(outputs, 1)
                     if args.cuda:
                         labels = labels.view(-1).cpu().numpy()
@@ -123,8 +142,12 @@ def main(args):
                           "Test Accuracy: {test_accuracy:6.4f}".format(**log_obj))
                     logs.append(log_obj)
 
-        val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
-        scheduler.step(val_loss)
+        if args.num_batches > 0 and (epoch + 1) * steps_per_epoch >= args.num_batches:
+            break
+
+        if args.evaluate_per_epoch:
+            val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
+            scheduler.step(val_loss)
 
     # Stop training
     optimizer.stop()
@@ -189,12 +212,15 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=20, metavar='N', help='number of epochs to train (default: 20)')
     parser.add_argument('--lr', type=float, default=0.1, metavar='LR', help='learning rate (default: 0.1)')
     parser.add_argument('--cuda', action='store_true', default=False, help='use CUDA for training')
-    parser.add_argument('--log-interval', type=int, default=50, metavar='N', help='how often to evaluate and print out')
+    parser.add_argument('--evaluate-per-epoch', action='store_true', default=False, help='whether to evaluate after each epoch')
+    parser.add_argument('--log-interval', type=int, default=-1, metavar='N', help='how often to evaluate and print out')
     parser.add_argument('--no-distributed', action='store_true', default=False, help='whether to use DownpourSGD or normal SGD')
     parser.add_argument('--worker-id', type=int, default=1, metavar='N', help='rank of the current worker (starting from 1)')
     parser.add_argument('--worker-num', type=int, default=1, metavar='N', help='number of workers in the training')
     parser.add_argument('--server', action='store_true', default=False, help='server node?')
     parser.add_argument('--dataset', type=str, default='CIFAR10', help='which dataset to train on')
+    parser.add_argument('--model', type=str, default='alexnet', help='which model to train')
+    parser.add_argument('--num-batches', type=int, default=100, metavar='N', help='number of batches to train (default: 100)')
     parser.add_argument('--master', type=str, default='localhost', help='ip address of the master (server) node')
     parser.add_argument('--port', type=str, default='2222', help='port on master node to communicate with')
     args = parser.parse_args()
@@ -208,8 +234,16 @@ if __name__ == "__main__":
         os.environ['MASTER_PORT'] = args.port
 
         if args.server:
-            model = AlexNet()
-            # model = torchvision.models.resnet50(num_classes=10)
+            if args.model == "alexnet":
+                model = AlexNet()
+            elif args.model == "resnet50":
+                # model = torchvision.models.resnet50(num_classes=10)
+                model = Resnet50(num_classes=10)
+            elif args.model == "inception3":
+                # model = torchvision.models.Inception3(num_classes=10)
+                model = Inception3(num_classes=10)
+            else:
+                raise Exception("Not implemented yet: {}".format(args.model))
             server = ParameterServer(model=model, worker_num=args.worker_num)
             server.run()
         else:
