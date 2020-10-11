@@ -10,11 +10,19 @@ from distbelief.utils.tracer import tracer
 _LOGGER = logging.getLogger(__name__)
 
 
-def build_distributed_model(model, lr, cuda=False):
+def build_distributed_model(model, lr, cuda=False, ignore_bn=False):
     class DistributedModel(model):
         def __init__(self, *args, **kwargs):
             super(DistributedModel, self).__init__(*args, **kwargs)
-            self.parameters_generator = self.parameters()
+            if ignore_bn:
+                bn_names = [name for name, module in self.named_modules() if isinstance(module, nn.BatchNorm2d)]
+                for module in self.modules():
+                    if isinstance(module, nn.BatchNorm2d):
+                        module.skip_layer = True
+                self.parameters_with_names = [(name, para) for name, para in self.named_parameters() if name.rsplit('.', maxsplit=1)[0] not in bn_names]
+            else:
+                # TODO (zhuojin): Verify name conflict
+                self.parameters_with_names = [(name, para) for name, para in self.named_parameters()]
             self.parameters_buffer = []  # For receivers collecting model parameters
             self.senders = []
             self.receivers = []
@@ -23,7 +31,7 @@ def build_distributed_model(model, lr, cuda=False):
             self.root_span = None
             self.hooks = []
             self.register_hooks()
-            for para in self.parameters():
+            for _, para in self.parameters_with_names:
                 self.parameters_buffer.append(torch.zeros(para.data.size()))
             for name, module in self.named_modules():
                 module.name = name
@@ -31,7 +39,7 @@ def build_distributed_model(model, lr, cuda=False):
             # Send a empty gradients to fetch the initial model from the server
             # Send gradients to the server layer by layer
             with tracer.start_active_span('init'):
-                for name, para in reversed(list(self.named_parameters())):
+                for name, para in reversed(self.parameters_with_names):
                     with tracer.start_active_span('send') as scope:
                         scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
                         name = name.rsplit('.', maxsplit=1)
@@ -76,7 +84,6 @@ def build_distributed_model(model, lr, cuda=False):
                 sender.wait()
 
         def reset_and_start_receivers(self):
-            self.parameters_generator = self.parameters()  # Reset generator
             self.receivers = []
             self.current_receiver = 0
             for para in self.parameters_buffer:
@@ -85,11 +92,11 @@ def build_distributed_model(model, lr, cuda=False):
 
         def wait_receiver(self):
             with tracer.start_active_span('recv', child_of=self.span) as scope:
-                size = self.parameters_buffer[self.current_receiver].nelement() * self.parameters_buffer[self.current_receiver].element_size()
                 self.receivers[self.current_receiver].wait()
+                name, para = self.parameters_with_names[self.current_receiver]
+                scope.span.set_tag('layer', name)
                 scope.span.set_tag('size', self.parameters_buffer[self.current_receiver].nelement() *
                                    self.parameters_buffer[self.current_receiver].element_size())
-                para = next(self.parameters_generator)
                 if cuda:
                     para.data = self.parameters_buffer[self.current_receiver].cuda()
                 else:
@@ -98,7 +105,9 @@ def build_distributed_model(model, lr, cuda=False):
 
         def forward_pre_hook_fn(self, module, input):
             self.span.finish()
-            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear) or isinstance(module, nn.BatchNorm2d):
+            if hasattr(module, 'skip_layer'):
+                pass
+            elif isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear) or isinstance(module, nn.BatchNorm2d):
                 self.wait_receiver()
                 if module.bias is not None:
                     self.wait_receiver()
@@ -110,7 +119,9 @@ def build_distributed_model(model, lr, cuda=False):
             self.span.finish()
             weight = None
             bias = None
-            if isinstance(module, nn.Conv2d):
+            if hasattr(module, 'skip_layer'):
+                pass
+            elif isinstance(module, nn.Conv2d):
                 weight = input[1]
                 # Note: For GPU training, the argument input will only contain bias if bias=True for nn.Conv2d,
                 # which is caused by a well-known issue of backward hooks in PyTorch. To bypass the issue, needs

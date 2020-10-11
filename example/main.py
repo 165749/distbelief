@@ -57,6 +57,7 @@ def main(args):
                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
                 ])
 
+    # TODO (zhuojin): Prepare dataset before joining communication group
     trainloader, testloader = get_dataset(args, transform)
 
     if args.no_distributed:
@@ -65,11 +66,11 @@ def main(args):
         if args.model == "alexnet":
             net = build_distributed_model(AlexNet, lr=args.lr, cuda=args.cuda)()
         elif args.model == "resnet50":
-            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
-            net = build_distributed_model(Resnet50, lr=args.lr, cuda=args.cuda)(num_classes=10)
+            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
+            net = build_distributed_model(Resnet50, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(num_classes=10)
         elif args.model == "inception3":
-            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda)(num_classes=10)
-            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda)(num_classes=10)
+            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(num_classes=10)
+            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(num_classes=10)
         else:
             raise Exception("Not implemented yet: {}".format(args.model))
 
@@ -90,6 +91,9 @@ def main(args):
         for i, data in enumerate(trainloader, 0):
             print('step {}'.format(i))
             with tracer.start_active_span('Epoch {} Step {}'.format(epoch, i)):
+                if args.display_time:
+                    start = time.time()
+
                 # Inform server starting next step (i.e., starting pushing the model to the worker)
                 net.step_begin()
 
@@ -116,6 +120,10 @@ def main(args):
                     loss.backward()
                     net.finish_tracer_span()
                 optimizer.step()
+
+                if args.display_time:
+                    end = time.time()
+                    print('time: {}'.format(end - start))
 
                 if args.num_batches > 0 and epoch * steps_per_epoch + i + 1 >= args.num_batches:
                     break
@@ -215,6 +223,8 @@ if __name__ == "__main__":
     parser.add_argument('--evaluate-per-epoch', action='store_true', default=False, help='whether to evaluate after each epoch')
     parser.add_argument('--log-interval', type=int, default=-1, metavar='N', help='how often to evaluate and print out')
     parser.add_argument('--no-distributed', action='store_true', default=False, help='whether to use DownpourSGD or normal SGD')
+    parser.add_argument('--display-time', action='store_true', default=False, help='whether to displace time of each training step')
+    parser.add_argument('--ignore-bn', action='store_true', default=False, help='whether to ignore bn layers when transmitting parameters')
     parser.add_argument('--worker-id', type=int, default=1, metavar='N', help='rank of the current worker (starting from 1)')
     parser.add_argument('--worker-num', type=int, default=1, metavar='N', help='number of workers in the training')
     parser.add_argument('--server', action='store_true', default=False, help='server node?')
@@ -244,7 +254,13 @@ if __name__ == "__main__":
                 model = Inception3(num_classes=10)
             else:
                 raise Exception("Not implemented yet: {}".format(args.model))
-            server = ParameterServer(model=model, worker_num=args.worker_num)
+            if args.ignore_bn:
+                bn_names = [name for name, module in model.named_modules() if isinstance(module, nn.BatchNorm2d)]
+                parameters_with_names = [(name, para) for name, para in model.named_parameters() if name.rsplit('.', maxsplit=1)[0] not in bn_names]
+            else:
+                # TODO (zhuojin): Verify name conflict
+                parameters_with_names = [(name, para) for name, para in model.named_parameters()]
+            server = ParameterServer(parameters_with_names=parameters_with_names, worker_num=args.worker_num)
             server.run()
         else:
             dist.init_process_group('gloo', rank=2 * args.worker_id - 1, world_size=2 * args.worker_num + 1)

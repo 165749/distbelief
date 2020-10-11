@@ -15,8 +15,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class GlobalModel:
-    def __init__(self, model):
-        self.global_model = [para.data for para in model.parameters()]
+    def __init__(self, parameters_with_names):
+        self.global_model = [para.data for name, para in parameters_with_names]
         self.lock = multiprocessing.Lock()
 
     def update(self, gradient_buffer):
@@ -37,19 +37,19 @@ class GlobalModel:
 
 
 class ParameterServer:
-    def __init__(self, model, worker_num):
+    def __init__(self, parameters_with_names, worker_num):
         _LOGGER.info("Creating ParameterServer")
         BaseManager.register("GlobalModel", GlobalModel)
         manager = BaseManager()
         manager.start()
-        self.global_model = manager.GlobalModel(model)
-        self.model = model
+        self.parameters_with_names = parameters_with_names
+        self.global_model = manager.GlobalModel(self.parameters_with_names)
         self.worker_num = worker_num
 
     def run(self):
         threads = []
-        layer_name = [name.rsplit('.', maxsplit=1) for name, _ in self.model.named_parameters()]
-        layer_shape = [list(para.data.size()) for para in self.model.parameters()]
+        layer_name = [name.rsplit('.', maxsplit=1) for name, _ in self.parameters_with_names]
+        layer_shape = [list(para.data.size()) for name, para in self.parameters_with_names]
         for server_id in range(2, 2*self.worker_num + 1, 2):
             thread = multiprocessing.Process(target=ParameterServer.receive, args=(self.global_model, layer_name, layer_shape, server_id, self.worker_num))
             thread.start()
