@@ -69,8 +69,8 @@ def main(args):
             # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
             net = build_distributed_model(Resnet50, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(num_classes=10)
         elif args.model == "inception3":
-            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(num_classes=10)
-            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(num_classes=10)
+            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(aux_logits=False, num_classes=10)
+            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(aux_logits=False, num_classes=10)
         else:
             raise Exception("Not implemented yet: {}".format(args.model))
 
@@ -250,8 +250,8 @@ if __name__ == "__main__":
                 # model = torchvision.models.resnet50(num_classes=10)
                 model = Resnet50(num_classes=10)
             elif args.model == "inception3":
-                # model = torchvision.models.Inception3(num_classes=10)
-                model = Inception3(num_classes=10)
+                # model = torchvision.models.Inception3(aux_logits=False, num_classes=10)
+                model = Inception3(aux_logits=False, num_classes=10)
             else:
                 raise Exception("Not implemented yet: {}".format(args.model))
             if args.ignore_bn:
