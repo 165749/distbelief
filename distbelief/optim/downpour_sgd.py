@@ -10,10 +10,14 @@ from distbelief.utils.tracer import tracer
 _LOGGER = logging.getLogger(__name__)
 
 
-def build_distributed_model(model, lr, cuda=False, ignore_bn=False):
+def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=False):
     class DistributedModel(model):
         def __init__(self, *args, **kwargs):
             super(DistributedModel, self).__init__(*args, **kwargs)
+            if no_overlap:
+                # If not overlapping communication and computation, skipping transmission during training
+                for module in self.modules():
+                    module.skip_layer = True
             if ignore_bn:
                 bn_names = [name for name, module in self.named_modules() if isinstance(module, nn.BatchNorm2d)]
                 for module in self.modules():
@@ -31,6 +35,7 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False):
             self.root_span = None
             self.hooks = []
             self.register_hooks()
+            self.no_overlap = no_overlap
             for _, para in self.parameters_with_names:
                 self.parameters_buffer.append(torch.zeros(para.data.size()))
             for name, module in self.named_modules():
@@ -46,7 +51,6 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False):
                         scope.span.set_tag('layer', name[0])
                         scope.span.set_tag('type', name[1])
                         dist.send(torch.zeros(para.data.size()), dist.get_rank() + 1)
-            self.reset_and_start_receivers()
 
         def register_hooks(self):
             print('Register hooks!')
@@ -94,7 +98,9 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False):
             with tracer.start_active_span('recv', child_of=self.span) as scope:
                 self.receivers[self.current_receiver].wait()
                 name, para = self.parameters_with_names[self.current_receiver]
-                scope.span.set_tag('layer', name)
+                name = name.rsplit('.', maxsplit=1)
+                scope.span.set_tag('layer', name[0])
+                scope.span.set_tag('type', name[1])
                 scope.span.set_tag('size', self.parameters_buffer[self.current_receiver].nelement() *
                                    self.parameters_buffer[self.current_receiver].element_size())
                 if cuda:
@@ -162,13 +168,25 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False):
             tensor = torch.zeros(1)
             dist.send(tensor, dist.get_rank() + 1)
 
+            if self.no_overlap:
+                with tracer.start_active_span('Downlink'):
+                    for name, para in self.parameters_with_names:
+                        with tracer.start_active_span('recv') as scope:
+                            scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                            name = name.rsplit('.', maxsplit=1)
+                            scope.span.set_tag('layer', name[0])
+                            scope.span.set_tag('type', name[1])
+                            dist.recv(para.data, dist.get_rank() + 1)
+            else:
+                self.reset_and_start_receivers()
+
     return DistributedModel
 
 
 class DownpourSGD(Optimizer):
     """DownpourSGD"""
 
-    def __init__(self, params, lr=required, model=required):
+    def __init__(self, params, lr=required, model=required, no_overlap=True):
         """__init__
 
         :param params:
@@ -180,6 +198,8 @@ class DownpourSGD(Optimizer):
 
         defaults = dict(lr=lr,)
         self.model = model
+        # Whether not to overlap communication and computation
+        self.no_overlap = no_overlap
 
         super(DownpourSGD, self).__init__(params, defaults)
 
@@ -194,31 +214,22 @@ class DownpourSGD(Optimizer):
         if closure is not None:
             loss = closure()
 
-        ''' Synchronous send
-        # Learning rate
-        lr = -self.param_groups[0]['lr']
-        # Send gradients to the server layer by layer
-        with tracer.start_active_span('send'):
-            for i, para in enumerate(self.model.parameters()):
-                with tracer.start_active_span('layer {}'.format(i)) as scope:
-                    scope.span.set_tag('size', para.grad.nelement() * para.grad.element_size())
-                    scope.span.set_tag('worker', dist.get_rank())
-                    dist.send(lr * para.grad, 0)
-        '''
-        self.model.wait_all_senders()
+        if self.no_overlap:
+            # Learning rate
+            lr = -self.param_groups[0]['lr']
+            # Send gradients to the server layer by layer
+            with tracer.start_active_span('Uplink'):
+                for name, para in reversed(self.model.parameters_with_names):
+                    with tracer.start_active_span('send') as scope:
+                        scope.span.set_tag('size', para.grad.nelement() * para.grad.element_size())
+                        name = name.rsplit('.', maxsplit=1)
+                        scope.span.set_tag('layer', name[0])
+                        scope.span.set_tag('type', name[1])
+                        dist.send(lr * para.grad, dist.get_rank() + 1)
+        else:
+            self.model.wait_all_senders()
 
         # Will pull parameters from the server, so no need to update internal parameters
-
-        '''Synchronous recv
-        # Wait the server to send back the updated model
-        with tracer.start_active_span('recv'):
-            for i, para in enumerate(self.model.parameters()):
-                with tracer.start_active_span('layer {}'.format(i)) as scope:
-                    scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
-                    scope.span.set_tag('worker', dist.get_rank())
-                    dist.recv(para.data)
-        '''
-        self.model.reset_and_start_receivers()
 
         return loss
 

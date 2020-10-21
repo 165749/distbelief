@@ -64,20 +64,20 @@ def main(args):
         net = AlexNet()
     else:
         if args.model == "alexnet":
-            net = build_distributed_model(AlexNet, lr=args.lr, cuda=args.cuda)()
+            net = build_distributed_model(AlexNet, lr=args.lr, cuda=args.cuda, no_overlap=args.no_overlap)()
         elif args.model == "resnet50":
-            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
-            net = build_distributed_model(Resnet50, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(num_classes=10)
+            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
+            net = build_distributed_model(Resnet50, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(num_classes=10)
         elif args.model == "inception3":
-            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(aux_logits=False, num_classes=10)
-            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn)(aux_logits=False, num_classes=10)
+            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
+            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
         else:
             raise Exception("Not implemented yet: {}".format(args.model))
 
     if args.no_distributed:
         optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.0)
     else:
-        optimizer = DownpourSGD(net.parameters(), lr=args.lr, model=net)
+        optimizer = DownpourSGD(net.parameters(), lr=args.lr, model=net, no_overlap=args.no_overlap)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1, verbose=True, min_lr=1e-3)
 
     # train
@@ -225,6 +225,7 @@ if __name__ == "__main__":
     parser.add_argument('--no-distributed', action='store_true', default=False, help='whether to use DownpourSGD or normal SGD')
     parser.add_argument('--display-time', action='store_true', default=False, help='whether to displace time of each training step')
     parser.add_argument('--ignore-bn', action='store_true', default=False, help='whether to ignore bn layers when transmitting parameters')
+    parser.add_argument('--no-overlap', action='store_true', default=False, help='whether not to overlap communication and computation')
     parser.add_argument('--worker-id', type=int, default=1, metavar='N', help='rank of the current worker (starting from 1)')
     parser.add_argument('--worker-num', type=int, default=1, metavar='N', help='number of workers in the training')
     parser.add_argument('--server', action='store_true', default=False, help='server node?')
