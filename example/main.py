@@ -27,7 +27,19 @@ from opentracing.propagation import Format
 def prepare_data(args):
     if args.model == "alexnet":
         transform = transforms.Compose([
-                    transforms.Resize(64),
+                    transforms.Resize(224 + 3),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                ])
+    elif args.model == "inception3":
+        transform = transforms.Compose([
+                    transforms.Resize(299),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                ])
+    elif args.model == "resnet50":
+        transform = transforms.Compose([
+                    transforms.Resize(224),
                     transforms.ToTensor(),
                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
                 ])
