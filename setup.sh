@@ -25,8 +25,8 @@ else
 fi
 
 # Install miniconda
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash Miniconda3-latest-Linux-x86_64.sh -b -p /local/miniconda
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /local/miniconda.sh
+bash /local/miniconda.sh -b -p /local/miniconda
 eval "$(/local/miniconda/bin/conda shell.bash hook)"
 conda create -n distbelief python=3.8 -y
 conda activate distbelief
