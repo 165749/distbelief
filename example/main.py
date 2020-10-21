@@ -23,28 +23,8 @@ from distbelief.server import ParameterServer
 from distbelief.utils.tracer import tracer, numbers_to_trace_context, trace_context_to_numbers
 from opentracing.propagation import Format
 
-def get_dataset(args, transform):
-    """
-    :param dataset_name:
-    :param transform:
-    :param batch_size:
-    :return: iterators for the dataset
-    """
-    if args.dataset == 'MNIST':
-        trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-        testset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-    else:
-        trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-        testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
 
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=1)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, num_workers=1)
-    return trainloader, testloader
-
-def main(args):
-
-    logs = []
-
+def prepare_data(args):
     if args.model == "alexnet":
         transform = transforms.Compose([
                     transforms.Resize(64),
@@ -57,8 +37,20 @@ def main(args):
                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
                 ])
 
-    # TODO (zhuojin): Prepare dataset before joining communication group
-    trainloader, testloader = get_dataset(args, transform)
+    if args.dataset == 'MNIST':
+        trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+        testset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+    else:
+        trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+        testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=1)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, num_workers=1)
+    return trainloader, testloader
+
+
+def main(args, trainloader, testloader):
+    logs = []
 
     if args.no_distributed:
         net = AlexNet()
@@ -264,6 +256,8 @@ if __name__ == "__main__":
             server = ParameterServer(parameters_with_names=parameters_with_names, worker_num=args.worker_num)
             server.run()
         else:
+            # Prepare data before joining communication group
+            trainloader, testloader = prepare_data(args)
             dist.init_process_group('gloo', rank=2 * args.worker_id - 1, world_size=2 * args.worker_num + 1)
             print("worker {} initialized".format(dist.get_rank()))
             tensor = torch.zeros(4, dtype=torch.int64)  # TODO (zhuojin): Remove hard-code
@@ -271,7 +265,7 @@ if __name__ == "__main__":
             context = numbers_to_trace_context(tensor.tolist())
             span_ctx = tracer.extract(Format.TEXT_MAP, context)
             with tracer.start_active_span('worker {}'.format(dist.get_rank()), child_of=span_ctx):
-                main(args)
+                main(args, trainloader, testloader)
         dist.destroy_process_group()
         # Wait for trace collection
         time.sleep(2)
