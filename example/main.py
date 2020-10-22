@@ -238,6 +238,7 @@ if __name__ == "__main__":
     parser.add_argument('--num-batches', type=int, default=100, metavar='N', help='number of batches to train (default: 100)')
     parser.add_argument('--master', type=str, default='localhost', help='ip address of the master (server) node')
     parser.add_argument('--port', type=str, default='2222', help='port on master node to communicate with')
+    parser.add_argument('--threads', type=int, default='0', help='How many threads to run')
     args = parser.parse_args()
     print(args)
 
@@ -276,6 +277,10 @@ if __name__ == "__main__":
             dist.recv(tensor=tensor)
             context = numbers_to_trace_context(tensor.tolist())
             span_ctx = tracer.extract(Format.TEXT_MAP, context)
+            # Set number of threads for each worker
+            if args.threads > 0:
+                torch.set_num_threads(args.threads)
+            print('number of threads: {}'.format(torch.get_num_threads()))
             with tracer.start_active_span('worker {}'.format(dist.get_rank()), child_of=span_ctx):
                 main(args, trainloader, testloader)
         dist.destroy_process_group()
