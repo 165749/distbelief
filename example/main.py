@@ -238,6 +238,7 @@ if __name__ == "__main__":
     parser.add_argument('--num-batches', type=int, default=100, metavar='N', help='number of batches to train (default: 100)')
     parser.add_argument('--master', type=str, default='localhost', help='ip address of the master (server) node')
     parser.add_argument('--port', type=str, default='2222', help='port on master node to communicate with')
+    parser.add_argument('--interface', type=str, default='none', help='Choose network interface to use')
     parser.add_argument('--threads', type=int, default='0', help='How many threads to run')
     args = parser.parse_args()
     print(args)
@@ -248,6 +249,9 @@ if __name__ == "__main__":
         """
         os.environ['MASTER_ADDR'] = args.master
         os.environ['MASTER_PORT'] = args.port
+        if args.interface != "none":
+            os.environ['GLOO_SOCKET_IFNAME'] = args.interface
+            print('Set network interface {}'.format(args.interface))
 
         if args.server:
             if args.model == "alexnet":
