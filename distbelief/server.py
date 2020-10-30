@@ -17,19 +17,19 @@ _LOGGER = logging.getLogger(__name__)
 class GlobalModel:
     def __init__(self, parameters_with_names):
         self.global_model = [para.data for name, para in parameters_with_names]
-        self.lock = multiprocessing.Lock()
+        self.locks = [multiprocessing.Lock() for _ in range(len(parameters_with_names))]
 
     def update(self, gradient_buffer):
-        self.lock.acquire()
         for i, gradients in enumerate(gradient_buffer):
+            self.locks[i].acquire()
             self.global_model[i].add_(gradients)
-        self.lock.release()
+            self.locks[i].release()
 
     def collect(self, gradient_buffer):
-        self.lock.acquire()
-        for buffer, para in zip(gradient_buffer, self.global_model):
-            buffer.copy_(para)
-        self.lock.release()
+        for i, gradients in enumerate(gradient_buffer):
+            self.locks[i].acquire()
+            gradients.copy_(self.global_model[i])
+            self.locks[i].release()
 
     @classmethod
     def get_tracer(cls):
