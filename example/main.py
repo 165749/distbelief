@@ -20,8 +20,7 @@ import torch.optim as optim
 from distbelief.optim import DownpourSGD
 from distbelief.optim.downpour_sgd import build_distributed_model
 from distbelief.server import ParameterServer
-from distbelief.utils.tracer import tracer, numbers_to_trace_context, trace_context_to_numbers
-from opentracing.propagation import Format
+from distbelief.utils.trace import Tracer
 
 
 def prepare_data(args):
@@ -64,17 +63,19 @@ def prepare_data(args):
 def main(args, trainloader, testloader):
     logs = []
 
+    tracer = Tracer()
+    root_span = tracer.start_span('worker {}'.format(dist.get_rank()))
     if args.no_distributed:
         net = AlexNet()
     else:
         if args.model == "alexnet":
-            net = build_distributed_model(AlexNet, lr=args.lr, cuda=args.cuda, no_overlap=args.no_overlap)()
+            net = build_distributed_model(AlexNet, lr=args.lr, tracer=tracer, cuda=args.cuda, no_overlap=args.no_overlap)()
         elif args.model == "resnet50":
-            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
-            net = build_distributed_model(Resnet50, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(num_classes=10)
+            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
+            net = build_distributed_model(Resnet50, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(num_classes=10)
         elif args.model == "inception3":
-            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
-            net = build_distributed_model(Inception3, lr=args.lr, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
+            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
+            net = build_distributed_model(Inception3, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
         else:
             raise Exception("Not implemented yet: {}".format(args.model))
 
@@ -94,7 +95,7 @@ def main(args, trainloader, testloader):
         print("Training for epoch {}".format(epoch))
         for i, data in enumerate(trainloader, 0):
             print('step {}'.format(i))
-            with tracer.start_active_span('Epoch {} Step {}'.format(epoch, i)):
+            with tracer.start_active_span('epoch {} step {}'.format(epoch, i)):
                 if args.display_time:
                     start = time.time()
 
@@ -106,21 +107,21 @@ def main(args, trainloader, testloader):
                 if args.cuda:
                     inputs, labels = inputs.cuda(), labels.cuda()
 
-                with tracer.start_active_span('Zero_grad'):
+                with tracer.start_active_span('zero_grad'):
                     # Clear the parameter gradients
                     optimizer.zero_grad()
 
-                with tracer.start_active_span('Forward') as scope:
-                    net.init_tracer_span(scope.span)
+                with tracer.start_active_span('forward'):
+                    net.init_tracer_span()
                     outputs = net(inputs)
                     net.finish_tracer_span()
 
                 with tracer.start_active_span('loss'):
                     loss = F.cross_entropy(outputs, labels)
 
-                with tracer.start_active_span('Backward') as scope:
+                with tracer.start_active_span('backward'):
                     net.reset_senders()
-                    net.init_tracer_span(scope.span)
+                    net.init_tracer_span()
                     loss.backward()
                     net.finish_tracer_span()
                 optimizer.step()
@@ -161,6 +162,8 @@ def main(args, trainloader, testloader):
             val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
             scheduler.step(val_loss)
 
+    root_span.finish()
+    tracer.export_traces("worker{}.json".format(dist.get_rank()))
     # Stop training
     optimizer.stop()
 
@@ -277,18 +280,13 @@ if __name__ == "__main__":
             trainloader, testloader = prepare_data(args)
             dist.init_process_group('gloo', rank=2 * args.worker_id - 1, world_size=2 * args.worker_num + 1)
             print("worker {} initialized".format(dist.get_rank()))
-            tensor = torch.zeros(4, dtype=torch.int64)  # TODO (zhuojin): Remove hard-code
-            dist.recv(tensor=tensor)
-            context = numbers_to_trace_context(tensor.tolist())
-            span_ctx = tracer.extract(Format.TEXT_MAP, context)
+
+            dist.recv(tensor=torch.zeros(1))
             # Set number of threads for each worker
             if args.threads > 0:
                 torch.set_num_threads(args.threads)
             print('number of threads: {}'.format(torch.get_num_threads()))
-            with tracer.start_active_span('worker {}'.format(dist.get_rank()), child_of=span_ctx):
-                main(args, trainloader, testloader)
+            main(args, trainloader, testloader)
         dist.destroy_process_group()
-        # Wait for trace collection
-        time.sleep(2)
     else:
         main(args)

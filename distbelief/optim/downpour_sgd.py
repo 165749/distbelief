@@ -3,14 +3,11 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.optim.optimizer import Optimizer, required
-from distbelief.utils.serialization import ravel_model_params, unravel_model_params
-from distbelief.utils.messaging import send_message
-from distbelief.utils.tracer import tracer
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=False):
+def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_overlap=False):
     class DistributedModel(model):
         def __init__(self, *args, **kwargs):
             super(DistributedModel, self).__init__(*args, **kwargs)
@@ -27,12 +24,13 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=F
             else:
                 # TODO (zhuojin): Verify name conflict
                 self.parameters_with_names = [(name, para) for name, para in self.named_parameters()]
+            self.worker_id = dist.get_rank()
+            self.tracer = tracer
             self.parameters_buffer = []  # For receivers collecting model parameters
             self.senders = []
             self.receivers = []
             self.current_receiver = 0
             self.span = None
-            self.root_span = None
             self.hooks = []
             self.register_hooks()
             self.no_overlap = no_overlap
@@ -45,12 +43,12 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=F
             # Send gradients to the server layer by layer
             with tracer.start_active_span('init'):
                 for name, para in reversed(self.parameters_with_names):
-                    with tracer.start_active_span('send') as scope:
-                        scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                    with tracer.start_active_span('send') as span:
+                        span.set_tag('size', para.data.nelement() * para.data.element_size())
                         name = name.rsplit('.', maxsplit=1)
-                        scope.span.set_tag('layer', name[0])
-                        scope.span.set_tag('type', name[1])
-                        dist.send(torch.zeros(para.data.size()), dist.get_rank() + 1)
+                        span.set_tag('layer', name[0])
+                        span.set_tag('type', name[1])
+                        dist.send(torch.zeros(para.data.size()), self.worker_id + 1)
 
         def register_hooks(self):
             print('Register hooks!')
@@ -65,9 +63,8 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=F
             for hook in self.hooks:
                 hook.remove()
 
-        def init_tracer_span(self, root_span):
-            self.root_span = root_span
-            self.span = tracer.start_span('compute', child_of=root_span)
+        def init_tracer_span(self):
+            self.span = self.tracer.start_span('compute')
 
         def finish_tracer_span(self):
             self.span.finish()
@@ -76,11 +73,11 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=F
             self.senders = []
 
         def send(self, tensor, layer, type):
-            with tracer.start_active_span('send') as scope:
-                scope.span.set_tag('size', tensor.nelement() * tensor.element_size())
-                scope.span.set_tag('layer', layer)
-                scope.span.set_tag('type', type)
-                sender = dist.isend(tensor, dist.get_rank() + 1)
+            with self.tracer.start_active_span('send') as span:
+                span.set_tag('size', tensor.nelement() * tensor.element_size())
+                span.set_tag('layer', layer)
+                span.set_tag('type', type)
+                sender = dist.isend(tensor, self.worker_id + 1)
                 self.senders.append(sender)
 
         def wait_all_senders(self):
@@ -91,18 +88,16 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=F
             self.receivers = []
             self.current_receiver = 0
             for para in self.parameters_buffer:
-                receiver = dist.irecv(para, dist.get_rank() + 1)
+                receiver = dist.irecv(para, self.worker_id + 1)
                 self.receivers.append(receiver)
 
         def wait_receiver(self):
-            with tracer.start_active_span('recv', child_of=self.span) as scope:
+            with self.tracer.start_active_span('recv') as span:
                 self.receivers[self.current_receiver].wait()
                 name, para = self.parameters_with_names[self.current_receiver]
                 name = name.rsplit('.', maxsplit=1)
-                scope.span.set_tag('layer', name[0])
-                scope.span.set_tag('type', name[1])
-                scope.span.set_tag('size', self.parameters_buffer[self.current_receiver].nelement() *
-                                   self.parameters_buffer[self.current_receiver].element_size())
+                span.set_tag('layer', name[0])
+                span.set_tag('type', name[1])
                 if cuda:
                     para.data = self.parameters_buffer[self.current_receiver].cuda()
                 else:
@@ -117,7 +112,7 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=F
                 self.wait_receiver()
                 if module.bias is not None:
                     self.wait_receiver()
-            self.span = tracer.start_span('compute', child_of=self.root_span)
+            self.span = self.tracer.start_span('compute')
             self.span.set_tag('layer', module.name)
 
         def backward_hook_fn(self, module, input, output):
@@ -142,41 +137,40 @@ def build_distributed_model(model, lr, cuda=False, ignore_bn=False, no_overlap=F
                 bias = input[0]
             # Reverse order in the backward
             if bias is not None:
-                with tracer.start_active_span('lr', child_of=self.root_span) as scope:
-                    scope.span.set_tag('layer', module.name)
-                    scope.span.set_tag('type', 'bias')
+                with self.tracer.start_active_span('lr') as span:
+                    span.set_tag('layer', module.name)
+                    span.set_tag('type', 'bias')
                     grad = (-lr) * bias
-                with tracer.start_active_span('copy', child_of=self.root_span) as scope:
-                    scope.span.set_tag('layer', module.name)
-                    scope.span.set_tag('type', 'bias')
+                with self.tracer.start_active_span('copy') as span:
+                    span.set_tag('layer', module.name)
+                    span.set_tag('type', 'bias')
                     grad = grad.cpu()
                     self.send(grad, module.name, 'bias')
             if weight is not None:
-                with tracer.start_active_span('lr', child_of=self.root_span) as scope:
-                    scope.span.set_tag('layer', module.name)
-                    scope.span.set_tag('type', 'weight')
+                with self.tracer.start_active_span('lr') as span:
+                    span.set_tag('layer', module.name)
+                    span.set_tag('type', 'weight')
                     grad = (-lr) * weight
-                with tracer.start_active_span('copy', child_of=self.root_span) as scope:
-                    scope.span.set_tag('layer', module.name)
-                    scope.span.set_tag('type', 'weight')
+                with self.tracer.start_active_span('copy') as span:
+                    span.set_tag('layer', module.name)
+                    span.set_tag('type', 'weight')
                     grad = grad.cpu()
                     self.send(grad, module.name, 'weight')
-            self.span = tracer.start_span('compute', child_of=self.root_span)
+            self.span = self.tracer.start_span('compute')
 
         def step_begin(self):
             # Inform the server starting next step (by setting tensor[0] to 0)
             tensor = torch.zeros(1)
-            dist.send(tensor, dist.get_rank() + 1)
+            dist.send(tensor, self.worker_id + 1)
 
             if self.no_overlap:
-                with tracer.start_active_span('Downlink'):
+                with self.tracer.start_active_span('Downlink'):
                     for name, para in self.parameters_with_names:
-                        with tracer.start_active_span('recv') as scope:
-                            scope.span.set_tag('size', para.data.nelement() * para.data.element_size())
+                        with self.tracer.start_active_span('recv') as span:
                             name = name.rsplit('.', maxsplit=1)
-                            scope.span.set_tag('layer', name[0])
-                            scope.span.set_tag('type', name[1])
-                            dist.recv(para.data, dist.get_rank() + 1)
+                            span.set_tag('layer', name[0])
+                            span.set_tag('type', name[1])
+                            dist.recv(para.data, self.worker_id + 1)
             else:
                 self.reset_and_start_receivers()
 
@@ -218,13 +212,13 @@ class DownpourSGD(Optimizer):
             # Learning rate
             lr = -self.param_groups[0]['lr']
             # Send gradients to the server layer by layer
-            with tracer.start_active_span('Uplink'):
+            with self.model.tracer.start_active_span('Uplink'):
                 for name, para in reversed(self.model.parameters_with_names):
-                    with tracer.start_active_span('send') as scope:
-                        scope.span.set_tag('size', para.grad.nelement() * para.grad.element_size())
+                    with self.model.tracer.start_active_span('send') as span:
+                        span.span.set_tag('size', para.grad.nelement() * para.grad.element_size())
                         name = name.rsplit('.', maxsplit=1)
-                        scope.span.set_tag('layer', name[0])
-                        scope.span.set_tag('type', name[1])
+                        span.span.set_tag('layer', name[0])
+                        span.span.set_tag('type', name[1])
                         dist.send(lr * para.grad, dist.get_rank() + 1)
         else:
             self.model.wait_all_senders()
