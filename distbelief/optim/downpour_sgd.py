@@ -22,7 +22,6 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                         module.skip_layer = True
                 self.parameters_with_names = [(name, para) for name, para in self.named_parameters() if name.rsplit('.', maxsplit=1)[0] not in bn_names]
             else:
-                # TODO (zhuojin): Verify name conflict
                 self.parameters_with_names = [(name, para) for name, para in self.named_parameters()]
             self.worker_id = dist.get_rank()
             self.tracer = tracer
@@ -69,9 +68,6 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
         def finish_tracer_span(self):
             self.span.finish()
 
-        def reset_senders(self):
-            self.senders = []
-
         def send(self, tensor, layer, type):
             with self.tracer.start_active_span('send') as span:
                 span.set_tag('size', tensor.nelement() * tensor.element_size())
@@ -83,6 +79,7 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
         def wait_all_senders(self):
             for i, sender in enumerate(self.senders):
                 sender.wait()
+            self.senders = []
 
         def reset_and_start_receivers(self):
             self.receivers = []

@@ -120,7 +120,6 @@ def main(args, trainloader, testloader):
                     loss = F.cross_entropy(outputs, labels)
 
                 with tracer.start_active_span('backward'):
-                    net.reset_senders()
                     net.init_tracer_span()
                     loss.backward()
                     net.finish_tracer_span()
@@ -271,7 +270,6 @@ if __name__ == "__main__":
                 bn_names = [name for name, module in model.named_modules() if isinstance(module, nn.BatchNorm2d)]
                 parameters_with_names = [(name, para) for name, para in model.named_parameters() if name.rsplit('.', maxsplit=1)[0] not in bn_names]
             else:
-                # TODO (zhuojin): Verify name conflict
                 parameters_with_names = [(name, para) for name, para in model.named_parameters()]
             server = ParameterServer(parameters_with_names=parameters_with_names, worker_num=args.worker_num)
             server.run()
