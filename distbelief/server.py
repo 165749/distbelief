@@ -56,6 +56,7 @@ class ParameterServer:
         # Wait for everyone to be ready
         for idx in range(1, 2 * self.worker_num + 1):
             dist.recv(tensor=torch.zeros(1), src=idx)
+        for idx in range(1, 2 * self.worker_num + 1):
             dist.send(tensor=torch.zeros(1), dst=idx)  # Send to everyone
 
         for thread in threads:
