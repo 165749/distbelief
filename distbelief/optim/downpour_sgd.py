@@ -41,6 +41,10 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
             # Send a empty gradients to fetch the initial model from the server
             # Send gradients to the server layer by layer
             with tracer.start_active_span('init'):
+                # Wait for starting up
+                with tracer.start_active_span('wait'):
+                    dist.send(tensor=torch.zeros(1), dst=0)
+                    dist.recv(tensor=torch.zeros(1), src=0)
                 for name, para in reversed(self.parameters_with_names):
                     with tracer.start_active_span('send') as span:
                         span.set_tag('size', para.data.nelement() * para.data.element_size())

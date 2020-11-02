@@ -279,7 +279,6 @@ if __name__ == "__main__":
             dist.init_process_group('gloo', rank=2 * args.worker_id - 1, world_size=2 * args.worker_num + 1)
             print("worker {} initialized".format(dist.get_rank()))
 
-            dist.recv(tensor=torch.zeros(1))
             # Set number of threads for each worker
             if args.threads > 0:
                 torch.set_num_threads(args.threads)

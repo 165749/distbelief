@@ -52,9 +52,11 @@ class ParameterServer:
         # Initialize communication group and root span
         dist.init_process_group('gloo', rank=0, world_size=2 * self.worker_num + 1, timeout=datetime.timedelta(days=1))
         print("server 0 initialized")
-        tensor = torch.zeros(1)
+
+        # Wait for everyone to be ready
         for idx in range(1, 2 * self.worker_num + 1):
-            dist.send(tensor=tensor, dst=idx)  # send to everyone
+            dist.recv(tensor=torch.zeros(1), src=idx)
+            dist.send(tensor=torch.zeros(1), dst=idx)  # Send to everyone
 
         for thread in threads:
             thread.join()
@@ -73,13 +75,15 @@ class ParameterServer:
         # Note (zhuojin): A potential issue may appear after forking. Temporarily solve it by set_num_threads to 1.
         torch.set_num_threads(1)
 
-        # Wait for starting up
-        dist.recv(tensor=torch.zeros(1))
         with tracer.start_active_span('server {}'.format(server_id)):
             span_step = tracer.start_span("init")
             gradient_buffers = [torch.zeros(shape) for shape in layer_shape]
             step_num = 0
 
+            # Wait for starting up
+            with tracer.start_active_span('wait'):
+                dist.send(tensor=torch.zeros(1), dst=0)
+                dist.recv(tensor=torch.zeros(1), src=0)
             while True:
                 # Receive gradients in the reverse order
                 for i in range(len(gradient_buffers)-1, -1, -1):
