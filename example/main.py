@@ -24,26 +24,26 @@ from distbelief.utils.trace import Tracer
 
 
 def prepare_data(args):
-    if args.model == "alexnet":
+    image_size = 0
+    if args.image_size < 0:
+        if args.model == "alexnet":
+            image_size = 224 + 3
+        elif args.model == "inception3":
+            image_size = 299
+        elif args.model == "resnet50":
+            image_size = 224
+    else:
+        image_size = args.image_size
+
+    assert image_size >= 0
+    if image_size == 0:
         transform = transforms.Compose([
-                    transforms.Resize(224 + 3),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-                ])
-    elif args.model == "inception3":
-        transform = transforms.Compose([
-                    transforms.Resize(299),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-                ])
-    elif args.model == "resnet50":
-        transform = transforms.Compose([
-                    transforms.Resize(224),
                     transforms.ToTensor(),
                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
                 ])
     else:
         transform = transforms.Compose([
+                    transforms.Resize(image_size),
                     transforms.ToTensor(),
                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
                 ])
@@ -238,6 +238,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type=str, default='CIFAR10', help='which dataset to train on')
     parser.add_argument('--model', type=str, default='alexnet', help='which model to train')
     parser.add_argument('--num-batches', type=int, default=100, metavar='N', help='number of batches to train (default: 100)')
+    parser.add_argument('--image-size', type=int, default=-1, metavar='N', help='size of images to train (default: -1, which will set the recommended image size for some models)')
     parser.add_argument('--master', type=str, default='localhost', help='ip address of the master (server) node')
     parser.add_argument('--port', type=str, default='2222', help='port on master node to communicate with')
     parser.add_argument('--interface', type=str, default='none', help='Choose network interface to use')
