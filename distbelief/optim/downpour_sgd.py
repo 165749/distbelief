@@ -142,9 +142,6 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                     span.set_tag('layer', module.name)
                     span.set_tag('type', 'bias')
                     grad = (-lr) * bias
-                with self.tracer.start_active_span('copy') as span:
-                    span.set_tag('layer', module.name)
-                    span.set_tag('type', 'bias')
                     grad = grad.cpu()
                     self.send(grad, module.name, 'bias')
             if weight is not None:
@@ -152,9 +149,6 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                     span.set_tag('layer', module.name)
                     span.set_tag('type', 'weight')
                     grad = (-lr) * weight
-                with self.tracer.start_active_span('copy') as span:
-                    span.set_tag('layer', module.name)
-                    span.set_tag('type', 'weight')
                     grad = grad.cpu()
                     self.send(grad, module.name, 'weight')
             self.span = self.tracer.start_span('compute')
@@ -165,13 +159,18 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
             dist.send(tensor, self.worker_id + 1)
 
             if self.no_overlap:
-                with self.tracer.start_active_span('Downlink'):
-                    for name, para in self.parameters_with_names:
+                with self.tracer.start_active_span('downlink'):
+                    for i, para_with_name in enumerate(self.parameters_with_names):
                         with self.tracer.start_active_span('recv') as span:
-                            name = name.rsplit('.', maxsplit=1)
+                            name = para_with_name[0].rsplit('.', maxsplit=1)
+                            para = para_with_name[1]
                             span.set_tag('layer', name[0])
                             span.set_tag('type', name[1])
-                            dist.recv(para.data, self.worker_id + 1)
+                            if cuda:
+                                dist.recv(self.parameters_buffer[i], self.worker_id + 1)
+                                para.data = self.parameters_buffer[i].cuda()
+                            else:
+                                dist.recv(para.data, self.worker_id + 1)
             else:
                 self.reset_and_start_receivers()
 
@@ -213,14 +212,19 @@ class DownpourSGD(Optimizer):
             # Learning rate
             lr = -self.param_groups[0]['lr']
             # Send gradients to the server layer by layer
-            with self.model.tracer.start_active_span('Uplink'):
+            with self.model.tracer.start_active_span('uplink'):
                 for name, para in reversed(self.model.parameters_with_names):
-                    with self.model.tracer.start_active_span('send') as span:
-                        span.span.set_tag('size', para.grad.nelement() * para.grad.element_size())
+                    with self.model.tracer.start_active_span('lr') as span:
                         name = name.rsplit('.', maxsplit=1)
-                        span.span.set_tag('layer', name[0])
-                        span.span.set_tag('type', name[1])
-                        dist.send(lr * para.grad, dist.get_rank() + 1)
+                        span.set_tag('layer', name[0])
+                        span.set_tag('type', name[1])
+                        grad = lr * para.grad
+                        grad = grad.cpu()
+                        with self.model.tracer.start_active_span('send') as send_span:
+                            send_span.set_tag('size', para.grad.nelement() * para.grad.element_size())
+                            send_span.set_tag('layer', name[0])
+                            send_span.set_tag('type', name[1])
+                            dist.send(grad, dist.get_rank() + 1)
         else:
             self.model.wait_all_senders()
 
