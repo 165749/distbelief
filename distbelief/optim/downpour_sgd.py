@@ -220,13 +220,9 @@ class DownpourSGD(Optimizer):
                         span.set_tag('type', name[1])
                         grad = lr * para.grad
                         grad = grad.cpu()
-                        with self.model.tracer.start_active_span('send') as send_span:
-                            send_span.set_tag('size', para.grad.nelement() * para.grad.element_size())
-                            send_span.set_tag('layer', name[0])
-                            send_span.set_tag('type', name[1])
-                            dist.send(grad, dist.get_rank() + 1)
-        else:
-            self.model.wait_all_senders()
+                        self.model.send(grad, name[0], name[1])
+
+        self.model.wait_all_senders()
 
         # Will pull parameters from the server, so no need to update internal parameters
 
