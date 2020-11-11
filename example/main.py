@@ -11,8 +11,11 @@ import torch.distributed as dist
 from datetime import datetime
 import time
 from models.alexnet import AlexNet
-from models.resnet import Resnet50
+from models.mobilenet import MobileNetV2
+from models.googlenet import GoogLeNet
 from models.inception import Inception3
+from models.resnet import Resnet50, Resnet101, Resnet152
+from models.vgg import Vgg11, Vgg13, Vgg16, Vgg19
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 import pandas as pd
 
@@ -22,16 +25,39 @@ from distbelief.optim.downpour_sgd import build_distributed_model
 from distbelief.server import ParameterServer
 from distbelief.utils.trace import Tracer
 
+_name_to_model = {
+    "alexnet": AlexNet,
+    "mobilenet": MobileNetV2,
+    "googlenet": GoogLeNet,
+    "inception3": Inception3,
+    "resnet50": Resnet50,
+    "resnet101": Resnet101,
+    "resnet152": Resnet152,
+    "vgg11": Vgg11,
+    "vgg13": Vgg13,
+    "vgg16": Vgg16,
+    "vgg19": Vgg19,
+}
+
 
 def prepare_data(args):
     image_size = 0
     if args.image_size < 0:
-        if args.model == "alexnet":
-            image_size = 224 + 3
-        elif args.model == "inception3":
-            image_size = 299
-        elif args.model == "resnet50":
-            image_size = 224
+        _name_to_image_size = {
+            "alexnet": 224 + 3,
+            "mobilenet": 224,
+            "googlenet": 224,
+            "inception3": 299,
+            "resnet50": 224,
+            "resnet101": 224,
+            "resnet152": 224,
+            "vgg11": 224,
+            "vgg13": 224,
+            "vgg16": 224,
+            "vgg19": 224,
+        }
+        if args.model in _name_to_image_size.keys():
+            image_size = _name_to_image_size[args.model]
     else:
         image_size = args.image_size
 
@@ -68,14 +94,8 @@ def main(args, trainloader, testloader):
     if args.no_distributed:
         net = AlexNet()
     else:
-        if args.model == "alexnet":
-            net = build_distributed_model(AlexNet, lr=args.lr, tracer=tracer, cuda=args.cuda, no_overlap=args.no_overlap)()
-        elif args.model == "resnet50":
-            # net = build_distributed_model(torchvision.models.ResNet, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_classes=10)
-            net = build_distributed_model(Resnet50, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(num_classes=10)
-        elif args.model == "inception3":
-            # net = build_distributed_model(torchvision.models.Inception3, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
-            net = build_distributed_model(Inception3, lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(aux_logits=False, num_classes=10)
+        if args.model in _name_to_model.keys():
+            net = build_distributed_model(_name_to_model[args.model], lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(num_classes=10)
         else:
             raise Exception("Not implemented yet: {}".format(args.model))
 
@@ -257,14 +277,8 @@ if __name__ == "__main__":
             print('Set network interface {}'.format(args.interface))
 
         if args.server:
-            if args.model == "alexnet":
-                model = AlexNet()
-            elif args.model == "resnet50":
-                # model = torchvision.models.resnet50(num_classes=10)
-                model = Resnet50(num_classes=10)
-            elif args.model == "inception3":
-                # model = torchvision.models.Inception3(aux_logits=False, num_classes=10)
-                model = Inception3(aux_logits=False, num_classes=10)
+            if args.model in _name_to_model.keys():
+                model = _name_to_model[args.model](num_classes=10)
             else:
                 raise Exception("Not implemented yet: {}".format(args.model))
             if args.ignore_bn:

@@ -204,3 +204,13 @@ class ResNet(nn.Module):
 class Resnet50(ResNet):
     def __init__(self, **kwargs):
         super(Resnet50, self).__init__(Bottleneck, [3, 4, 6, 3], **kwargs)
+
+
+class Resnet101(ResNet):
+    def __init__(self, **kwargs):
+        super(Resnet101, self).__init__(Bottleneck, [3, 4, 23, 3], **kwargs)
+
+
+class Resnet152(ResNet):
+    def __init__(self, **kwargs):
+        super(Resnet152, self).__init__(Bottleneck, [3, 8, 36, 3], **kwargs)
