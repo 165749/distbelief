@@ -3,6 +3,7 @@ import time
 import collections
 import gzip
 import json
+import torch
 
 
 class Span:
@@ -23,9 +24,13 @@ class Span:
         self.finish()
 
     def start(self):
+        if self.tracer.cuda:
+            torch.cuda.synchronize()
         self.start_time = time.time_ns()
 
     def finish(self):
+        if self.tracer.cuda:
+            torch.cuda.synchronize()
         if self.end_time is None:
             self.end_time = time.time_ns()
             self.tracer.finish_current_span()
@@ -38,7 +43,8 @@ class Span:
 
 # Note: tracer is not thread-safe
 class Tracer:
-    def __init__(self):
+    def __init__(self, cuda=False):
+        self.cuda = cuda
         self.traces_collection = []
         self.current_span = Span(tracer=self, parent_id=0, span_id=0, name="root")
         self.context_stack = collections.deque()

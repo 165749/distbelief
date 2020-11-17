@@ -89,7 +89,7 @@ def prepare_data(args):
 def main(args, trainloader, testloader):
     logs = []
 
-    tracer = Tracer()
+    tracer = Tracer(cuda=args.cuda)
     root_span = tracer.start_span('worker {}'.format(dist.get_rank()))
     if args.no_distributed:
         net = AlexNet()
