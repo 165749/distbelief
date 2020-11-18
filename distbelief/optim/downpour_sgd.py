@@ -93,8 +93,9 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                 self.receivers.append(receiver)
 
         def wait_receiver(self):
-            with self.tracer.start_active_span('recv') as span:
+            with self.tracer.start_active_span('recv'):
                 self.receivers[self.current_receiver].wait()
+            with self.tracer.start_active_span('copy') as span:
                 name, para = self.parameters_with_names[self.current_receiver]
                 name = name.rsplit('.', maxsplit=1)
                 span.set_tag('layer', name[0])
@@ -161,16 +162,17 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
             if self.no_overlap:
                 with self.tracer.start_active_span('downlink'):
                     for i, para_with_name in enumerate(self.parameters_with_names):
-                        with self.tracer.start_active_span('recv') as span:
+                        with self.tracer.start_active_span('recv'):
+                            dist.recv(self.parameters_buffer[i], self.worker_id + 1)
+                        with self.tracer.start_active_span('copy') as span:
                             name = para_with_name[0].rsplit('.', maxsplit=1)
-                            para = para_with_name[1]
                             span.set_tag('layer', name[0])
                             span.set_tag('type', name[1])
+                            para = para_with_name[1]
                             if cuda:
-                                dist.recv(self.parameters_buffer[i], self.worker_id + 1)
                                 para.data = self.parameters_buffer[i].cuda()
                             else:
-                                dist.recv(para.data, self.worker_id + 1)
+                                para.data = self.parameters_buffer[i]
             else:
                 self.reset_and_start_receivers()
 
