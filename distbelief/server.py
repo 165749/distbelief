@@ -66,6 +66,7 @@ class ParameterServer:
         layer_name = [name.rsplit('.', maxsplit=1) for name, _ in parameters_with_names]
 
         with tracer.start_active_span('server {}'.format(server_id)):
+            span_step = tracer.start_span("init")
             gradient_buffers = [torch.zeros(para.data.size()) for _, para in parameters_with_names]
             step_num = 0
 
