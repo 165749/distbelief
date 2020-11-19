@@ -281,12 +281,7 @@ if __name__ == "__main__":
                 model = _name_to_model[args.model](num_classes=10)
             else:
                 raise Exception("Not implemented yet: {}".format(args.model))
-            if args.ignore_bn:
-                bn_names = [name for name, module in model.named_modules() if isinstance(module, nn.BatchNorm2d)]
-                parameters_with_names = [(name, para) for name, para in model.named_parameters() if name.rsplit('.', maxsplit=1)[0] not in bn_names]
-            else:
-                parameters_with_names = [(name, para) for name, para in model.named_parameters()]
-            server = ParameterServer(parameters_with_names=parameters_with_names, worker_num=args.worker_num)
+            server = ParameterServer(args=args, model=model, worker_num=args.worker_num)
             server.run()
         else:
             # Prepare data before joining communication group
