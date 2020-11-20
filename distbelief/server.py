@@ -15,6 +15,8 @@ class ParameterServer:
     def __init__(self, args, model, worker_num):
         _LOGGER.info("Creating ParameterServer")
         # Store model in the shared memory
+        if args.cuda:
+            model = model.cuda()
         model.share_memory()
         if args.ignore_bn:
             bn_names = [name for name, module in model.named_modules() if isinstance(module, torch.nn.BatchNorm2d)]
@@ -24,12 +26,13 @@ class ParameterServer:
             parameters_with_names = [(name, para) for name, para in model.named_parameters()]
         self.parameters_with_names = parameters_with_names
         self.worker_num = worker_num
+        self.cuda = args.cuda
 
     def run(self):
         threads = []
         torch.multiprocessing.set_start_method('spawn')
         for server_id in range(2, 2*self.worker_num + 1, 2):
-            thread = torch.multiprocessing.Process(target=ParameterServer.receive, args=(self.parameters_with_names, server_id, self.worker_num))
+            thread = torch.multiprocessing.Process(target=ParameterServer.receive, args=(self.parameters_with_names, server_id, self.worker_num, self.cuda))
             thread.start()
             threads.append(thread)
 
@@ -49,7 +52,7 @@ class ParameterServer:
         print("server 0 finished")
 
     @classmethod
-    def receive(cls, parameters_with_names, server_id, worker_num):
+    def receive(cls, parameters_with_names, server_id, worker_num, cuda):
         # Set up communication group
         dist.init_process_group('gloo', rank=server_id, world_size=2 * worker_num + 1, timeout=datetime.timedelta(days=1))
         print("server {} initialized".format(server_id))
@@ -85,7 +88,10 @@ class ParameterServer:
                 else:
                     with tracer.start_active_span('update'):
                         for i, gradients in enumerate(gradient_buffers):
-                            global_model[i].add_(gradients)
+                            if cuda:
+                                global_model[i].add_(gradients.cuda())
+                            else:
+                                global_model[i].add_(gradients)
                     tensor = torch.zeros(1)
                     dist.recv(tensor=tensor, src=server_id - 1)
                     span_step.finish()
@@ -95,7 +101,10 @@ class ParameterServer:
                     step_num += 1
                     with tracer.start_active_span('collect'):
                         for i, gradients in enumerate(gradient_buffers):
-                            gradients.copy_(global_model[i])
+                            if cuda:
+                                gradient_buffers[i] = global_model[i].cpu()
+                            else:
+                                gradients.copy_(global_model[i])
                     for i, para in enumerate(gradient_buffers):
                         with tracer.start_active_span('send') as span:
                             span.set_tag('size', para.nelement() * para.element_size())
