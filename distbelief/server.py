@@ -36,7 +36,7 @@ class ParameterServer:
             thread.start()
             threads.append(thread)
 
-        # Initialize communication group and root span
+        # Initialize communication group
         dist.init_process_group('gloo', rank=0, world_size=2 * self.worker_num + 1, timeout=datetime.timedelta(days=1))
         print("server 0 initialized")
 
@@ -58,7 +58,7 @@ class ParameterServer:
         print("server {} initialized".format(server_id))
 
         # Start tracer for each server
-        tracer = Tracer()
+        tracer = Tracer(cuda=cuda)
 
         # # Set CPU affinity for the server thread
         # proc = psutil.Process()
@@ -78,14 +78,16 @@ class ParameterServer:
                 dist.send(tensor=torch.zeros(1), dst=0)
                 dist.recv(tensor=torch.zeros(1), src=0)
             while True:
+                receivers = []
                 # Receive gradients in the reverse order
-                for i in range(len(gradient_buffers)-1, -1, -1):
-                    buffer = gradient_buffers[i]
-                    with tracer.start_active_span('recv') as span:
-                        span.set_tag('layer', layer_name[i][0])
-                        span.set_tag('type', layer_name[i][1])
-                        dist.recv(tensor=buffer, src=server_id - 1)
+                for buffer in reversed(gradient_buffers):
+                    receivers.append(dist.irecv(tensor=buffer, src=server_id - 1))
                 else:
+                    for i in range(len(gradient_buffers)-1, -1, -1):
+                        with tracer.start_active_span('recv') as span:
+                            span.set_tag('layer', layer_name[i][0])
+                            span.set_tag('type', layer_name[i][1])
+                            receivers[i].wait()
                     with tracer.start_active_span('update'):
                         for i, gradients in enumerate(gradient_buffers):
                             if cuda:
