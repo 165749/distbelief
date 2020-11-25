@@ -159,22 +159,11 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
             tensor = torch.zeros(1)
             dist.send(tensor, self.worker_id + 1)
 
+            self.reset_and_start_receivers()
             if self.no_overlap:
                 with self.tracer.start_active_span('downlink'):
-                    for i, para_with_name in enumerate(self.parameters_with_names):
-                        with self.tracer.start_active_span('recv'):
-                            dist.recv(self.parameters_buffer[i], self.worker_id + 1)
-                        with self.tracer.start_active_span('copy') as span:
-                            name = para_with_name[0].rsplit('.', maxsplit=1)
-                            span.set_tag('layer', name[0])
-                            span.set_tag('type', name[1])
-                            para = para_with_name[1]
-                            if cuda:
-                                para.data = self.parameters_buffer[i].cuda()
-                            else:
-                                para.data = self.parameters_buffer[i]
-            else:
-                self.reset_and_start_receivers()
+                    for _ in self.parameters_with_names:
+                        self.wait_receiver()
 
     return DistributedModel
 
@@ -223,8 +212,9 @@ class DownpourSGD(Optimizer):
                         grad = lr * para.grad
                         grad = grad.cpu()
                         self.model.send(grad, name[0], name[1])
-
-        self.model.wait_all_senders()
+                self.model.wait_all_senders()
+        else:
+            self.model.wait_all_senders()
 
         # Will pull parameters from the server, so no need to update internal parameters
 
