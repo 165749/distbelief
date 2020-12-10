@@ -54,7 +54,7 @@ def prepare_data(args):
             "vgg11": 224,
             "vgg13": 224,
             "vgg16": 224,
-            "vgg19": 224,
+            "vgg19": 256,
         }
         if args.model in _name_to_image_size.keys():
             image_size = _name_to_image_size[args.model]

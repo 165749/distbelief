@@ -101,7 +101,7 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                 span.set_tag('layer', name[0])
                 span.set_tag('type', name[1])
                 if cuda:
-                    para.data = self.parameters_buffer[self.current_receiver].cuda()
+                    para.data.copy_(self.parameters_buffer[self.current_receiver])
                 else:
                     para.data = self.parameters_buffer[self.current_receiver]
                 self.current_receiver += 1
