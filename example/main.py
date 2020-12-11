@@ -263,6 +263,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=str, default='2222', help='port on master node to communicate with')
     parser.add_argument('--interface', type=str, default='none', help='Choose network interface to use')
     parser.add_argument('--threads', type=int, default='0', help='How many threads to run')
+    parser.add_argument('--sync', action='store_true', default=False, help='Enable synchronous training')
     args = parser.parse_args()
     print(args)
 

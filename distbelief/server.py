@@ -27,12 +27,13 @@ class ParameterServer:
         self.parameters_with_names = parameters_with_names
         self.worker_num = worker_num
         self.cuda = args.cuda
+        self.barrier = torch.multiprocessing.Barrier(worker_num) if args.sync else None
 
     def run(self):
         threads = []
         torch.multiprocessing.set_start_method('spawn')
         for server_id in range(2, 2*self.worker_num + 1, 2):
-            thread = torch.multiprocessing.Process(target=ParameterServer.receive, args=(self.parameters_with_names, server_id, self.worker_num, self.cuda))
+            thread = torch.multiprocessing.Process(target=ParameterServer.receive, args=(self.parameters_with_names, server_id, self.worker_num, self.cuda, self.barrier))
             thread.start()
             threads.append(thread)
 
@@ -52,7 +53,7 @@ class ParameterServer:
         print("server 0 finished")
 
     @classmethod
-    def receive(cls, parameters_with_names, server_id, worker_num, cuda):
+    def receive(cls, parameters_with_names, server_id, worker_num, cuda, barrier):
         # Set up communication group
         dist.init_process_group('gloo', rank=server_id, world_size=2 * worker_num + 1, timeout=datetime.timedelta(days=1))
         print("server {} initialized".format(server_id))
@@ -95,6 +96,9 @@ class ParameterServer:
                             global_model[i].add_(gradients)
                 tensor = torch.zeros(1)
                 dist.recv(tensor=tensor, src=server_id - 1)
+                if barrier is not None:
+                    with tracer.start_active_span('barrier'):
+                        barrier.wait()
                 span_step.finish()
                 if tensor[0] == float('inf'):
                     break
