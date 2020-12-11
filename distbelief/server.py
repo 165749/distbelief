@@ -27,13 +27,14 @@ class ParameterServer:
         self.parameters_with_names = parameters_with_names
         self.worker_num = worker_num
         self.cuda = args.cuda
-        self.barrier = torch.multiprocessing.Barrier(worker_num) if args.sync else None
+        self.sync = args.sync
 
     def run(self):
         threads = []
         torch.multiprocessing.set_start_method('spawn')
+        barrier = torch.multiprocessing.Barrier(self.worker_num) if self.sync else None
         for server_id in range(2, 2*self.worker_num + 1, 2):
-            thread = torch.multiprocessing.Process(target=ParameterServer.receive, args=(self.parameters_with_names, server_id, self.worker_num, self.cuda, self.barrier))
+            thread = torch.multiprocessing.Process(target=ParameterServer.receive, args=(self.parameters_with_names, server_id, self.worker_num, self.cuda, barrier))
             thread.start()
             threads.append(thread)
 
