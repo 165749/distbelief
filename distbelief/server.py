@@ -95,6 +95,12 @@ class ParameterServer:
                             global_model[i].add_(gradients.cuda())
                         else:
                             global_model[i].add_(gradients)
+                with tracer.start_active_span('collect'):
+                    for i, gradients in enumerate(gradient_buffers):
+                        if cuda:
+                            gradient_buffers[i] = global_model[i].cpu()
+                        else:
+                            gradients.copy_(global_model[i])
                 tensor = torch.zeros(1)
                 dist.recv(tensor=tensor, src=server_id - 1)
                 if barrier is not None:
@@ -105,12 +111,6 @@ class ParameterServer:
                     break
                 span_step = tracer.start_span('step {}'.format(step_num))
                 step_num += 1
-                with tracer.start_active_span('collect'):
-                    for i, gradients in enumerate(gradient_buffers):
-                        if cuda:
-                            gradient_buffers[i] = global_model[i].cpu()
-                        else:
-                            gradients.copy_(global_model[i])
                 for i, para in enumerate(gradient_buffers):
                     with tracer.start_active_span('send') as span:
                         span.set_tag('size', para.nelement() * para.element_size())
