@@ -95,14 +95,14 @@ def main(args, trainloader, testloader):
         net = AlexNet()
     else:
         if args.model in _name_to_model.keys():
-            net = build_distributed_model(_name_to_model[args.model], lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap)(num_classes=10)
+            net = build_distributed_model(_name_to_model[args.model], lr=args.lr, tracer=tracer, cuda=args.cuda, ignore_bn=args.ignore_bn, no_overlap=args.no_overlap, all_reduce=args.all_reduce)(num_classes=10)
         else:
             raise Exception("Not implemented yet: {}".format(args.model))
 
     if args.no_distributed:
         optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.0)
     else:
-        optimizer = DownpourSGD(net.parameters(), lr=args.lr, model=net, no_overlap=args.no_overlap)
+        optimizer = DownpourSGD(net.parameters(), lr=args.lr, model=net)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1, verbose=True, min_lr=1e-3)
 
     # train
@@ -252,6 +252,7 @@ if __name__ == "__main__":
     parser.add_argument('--display-time', action='store_true', default=False, help='whether to displace time of each training step')
     parser.add_argument('--ignore-bn', action='store_true', default=False, help='whether to ignore bn layers when transmitting parameters')
     parser.add_argument('--no-overlap', action='store_true', default=False, help='whether not to overlap communication and computation')
+    parser.add_argument('--all-reduce', action='store_true', default=False, help='whether to use all_reduce collective communications')
     parser.add_argument('--worker-id', type=int, default=1, metavar='N', help='rank of the current worker (starting from 1)')
     parser.add_argument('--worker-num', type=int, default=1, metavar='N', help='number of workers in the training')
     parser.add_argument('--server', action='store_true', default=False, help='server node?')

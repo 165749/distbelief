@@ -7,7 +7,7 @@ from torch.optim.optimizer import Optimizer, required
 _LOGGER = logging.getLogger(__name__)
 
 
-def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_overlap=False):
+def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_overlap=False, all_reduce=False):
     class DistributedModel(model):
         def __init__(self, *args, **kwargs):
             super(DistributedModel, self).__init__(*args, **kwargs)
@@ -23,6 +23,9 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                 self.parameters_with_names = [(name, para) for name, para in self.named_parameters() if name.rsplit('.', maxsplit=1)[0] not in bn_names]
             else:
                 self.parameters_with_names = [(name, para) for name, para in self.named_parameters()]
+            if all_reduce:
+                # All workers in the communication group
+                self.all_reduce_group = dist.new_group([i for i in range(1, dist.get_world_size(), 2)])
             self.worker_id = dist.get_rank()
             self.tracer = tracer
             self.parameters_buffer = []  # For receivers collecting model parameters
@@ -33,6 +36,7 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
             self.hooks = []
             self.register_hooks()
             self.no_overlap = no_overlap
+            self.all_reduce = all_reduce
             for _, para in self.parameters_with_names:
                 self.parameters_buffer.append(torch.zeros(para.data.size()))
             for name, module in self.named_modules():
@@ -45,6 +49,9 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                 with tracer.start_active_span('wait'):
                     dist.send(tensor=torch.zeros(1), dst=0)
                     dist.recv(tensor=torch.zeros(1), src=0)
+                # If performing all-reduce, do not need to send parameters to the server
+                if all_reduce:
+                    return
                 for name, para in reversed(self.parameters_with_names):
                     with tracer.start_active_span('send') as span:
                         span.set_tag('size', para.data.nelement() * para.data.element_size())
@@ -79,6 +86,13 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                 span.set_tag('type', type)
                 sender = dist.isend(tensor, self.worker_id + 1)
                 self.senders.append(sender)
+
+        def send_all_reduce(self, tensor, layer, type):
+            with self.tracer.start_active_span('send') as span:
+                span.set_tag('size', tensor.nelement() * tensor.element_size())
+                span.set_tag('layer', layer)
+                span.set_tag('type', type)
+                dist.all_reduce(tensor, op=dist.reduce_op.SUM, group=self.all_reduce_group)
 
         def wait_all_senders(self):
             for i, sender in enumerate(self.senders):
@@ -159,6 +173,10 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
             tensor = torch.zeros(1)
             dist.send(tensor, self.worker_id + 1)
 
+            # If performing all-reduce, do not need to receive parameters from the server
+            if self.all_reduce:
+                return
+
             self.reset_and_start_receivers()
             if self.no_overlap:
                 with self.tracer.start_active_span('downlink'):
@@ -171,7 +189,7 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
 class DownpourSGD(Optimizer):
     """DownpourSGD"""
 
-    def __init__(self, params, lr=required, model=required, no_overlap=True):
+    def __init__(self, params, lr=required, model=required):
         """__init__
 
         :param params:
@@ -183,8 +201,6 @@ class DownpourSGD(Optimizer):
 
         defaults = dict(lr=lr,)
         self.model = model
-        # Whether not to overlap communication and computation
-        self.no_overlap = no_overlap
 
         super(DownpourSGD, self).__init__(params, defaults)
 
@@ -199,20 +215,32 @@ class DownpourSGD(Optimizer):
         if closure is not None:
             loss = closure()
 
-        if self.no_overlap:
+        if self.model.no_overlap:
             # Learning rate
             lr = -self.param_groups[0]['lr']
             # Send gradients to the server layer by layer
-            with self.model.tracer.start_active_span('uplink'):
-                for name, para in reversed(self.model.parameters_with_names):
-                    with self.model.tracer.start_active_span('lr') as span:
-                        name = name.rsplit('.', maxsplit=1)
-                        span.set_tag('layer', name[0])
-                        span.set_tag('type', name[1])
-                        grad = lr * para.grad
-                        grad = grad.cpu()
-                        self.model.send(grad, name[0], name[1])
-                self.model.wait_all_senders()
+            if self.model.all_reduce:
+                with self.model.tracer.start_active_span('uplink'):
+                    for name, para in self.model.parameters_with_names:
+                        with self.model.tracer.start_active_span('lr') as span:
+                            name = name.rsplit('.', maxsplit=1)
+                            span.set_tag('layer', name[0])
+                            span.set_tag('type', name[1])
+                            self.model.send_all_reduce(para.grad, name[0], name[1])
+                with self.model.tracer.start_active_span('update'):
+                    for name, para in self.model.parameters_with_names:
+                        para.data += lr * para.grad
+            else:
+                with self.model.tracer.start_active_span('uplink'):
+                    for name, para in reversed(self.model.parameters_with_names):
+                        with self.model.tracer.start_active_span('lr') as span:
+                            name = name.rsplit('.', maxsplit=1)
+                            span.set_tag('layer', name[0])
+                            span.set_tag('type', name[1])
+                            grad = lr * para.grad
+                            grad = grad.cpu()
+                            self.model.send(grad, name[0], name[1])
+                    self.model.wait_all_senders()
         else:
             self.model.wait_all_senders()
 
