@@ -92,7 +92,7 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                 span.set_tag('size', tensor.nelement() * tensor.element_size())
                 span.set_tag('layer', layer)
                 span.set_tag('type', type)
-                dist.all_reduce(tensor, op=dist.reduce_op.SUM, group=self.all_reduce_group)
+                dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=self.all_reduce_group)
 
         def wait_all_senders(self):
             for i, sender in enumerate(self.senders):
