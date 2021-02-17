@@ -115,64 +115,64 @@ def main(args, trainloader, testloader):
         print("Training for epoch {}".format(epoch))
         for i, data in enumerate(trainloader, 0):
             print('step {}'.format(i))
-            with tracer.start_active_span('epoch {} step {}'.format(epoch, i)):
-                if args.display_time:
-                    start = time.time()
 
-                # Inform server starting next step (i.e., starting pushing the model to the worker)
-                net.step_begin()
+            if args.display_time:
+                start = time.time()
 
+            # Inform server starting next step (i.e., starting pushing the model to the worker)
+            net.step_begin(epoch, i)
+
+            with tracer.start_active_span('prepare_data'):
                 inputs, labels = data
-
                 if args.cuda:
                     inputs, labels = inputs.cuda(), labels.cuda()
 
-                with tracer.start_active_span('zero_grad'):
-                    # Clear the parameter gradients
-                    optimizer.zero_grad()
+            with tracer.start_active_span('zero_grad'):
+                # Clear the parameter gradients
+                optimizer.zero_grad()
 
-                with tracer.start_active_span('forward'):
-                    net.init_tracer_span()
-                    outputs = net(inputs)
-                    net.finish_tracer_span()
+            with tracer.start_active_span('forward'):
+                net.init_tracer_span()
+                outputs = net(inputs)
+                net.finish_tracer_span()
 
-                with tracer.start_active_span('loss'):
-                    loss = F.cross_entropy(outputs, labels)
+            with tracer.start_active_span('loss'):
+                loss = F.cross_entropy(outputs, labels)
 
-                with tracer.start_active_span('backward'):
-                    net.init_tracer_span()
-                    loss.backward()
-                    net.finish_tracer_span()
-                optimizer.step()
+            with tracer.start_active_span('backward'):
+                net.init_tracer_span()
+                loss.backward()
+                net.finish_tracer_span()
+            optimizer.step()
 
-                if args.display_time:
-                    end = time.time()
-                    print('time: {}'.format(end - start))
+            if args.display_time:
+                end = time.time()
+                print('time: {}'.format(end - start))
 
-                if args.num_batches > 0 and epoch * steps_per_epoch + i + 1 >= args.num_batches:
-                    break
-                if args.log_interval > 0 and i % args.log_interval == 0 and i > 0:
-                    _, predicted = torch.max(outputs, 1)
-                    if args.cuda:
-                        labels = labels.view(-1).cpu().numpy()
-                        predicted = predicted.view(-1).cpu().numpy()
-                    accuracy = accuracy_score(predicted, labels)
+            if args.num_batches > 0 and epoch * steps_per_epoch + i + 1 >= args.num_batches:
+                break
+            if args.log_interval > 0 and i % args.log_interval == 0 and i > 0:
+                _, predicted = torch.max(outputs, 1)
+                if args.cuda:
+                    labels = labels.view(-1).cpu().numpy()
+                    predicted = predicted.view(-1).cpu().numpy()
+                accuracy = accuracy_score(predicted, labels)
 
-                    log_obj = {
-                        'timestamp': datetime.now(),
-                        'iteration': i,
-                        'training_loss': loss.item(),
-                        'training_accuracy': accuracy,
-                    }
+                log_obj = {
+                    'timestamp': datetime.now(),
+                    'iteration': i,
+                    'training_loss': loss.item(),
+                    'training_accuracy': accuracy,
+                }
 
-                    log_obj['test_loss'], log_obj['test_accuracy'] = evaluate(net, testloader, args)
-                    print("Timestamp: {timestamp} | "
-                          "Iteration: {iteration:6} | "
-                          "Loss: {training_loss:6.4f} | "
-                          "Accuracy : {training_accuracy:6.4f} | "
-                          "Test Loss: {test_loss:6.4f} | "
-                          "Test Accuracy: {test_accuracy:6.4f}".format(**log_obj))
-                    logs.append(log_obj)
+                log_obj['test_loss'], log_obj['test_accuracy'] = evaluate(net, testloader, args)
+                print("Timestamp: {timestamp} | "
+                      "Iteration: {iteration:6} | "
+                      "Loss: {training_loss:6.4f} | "
+                      "Accuracy : {training_accuracy:6.4f} | "
+                      "Test Loss: {test_loss:6.4f} | "
+                      "Test Accuracy: {test_accuracy:6.4f}".format(**log_obj))
+                logs.append(log_obj)
 
         if args.num_batches > 0 and (epoch + 1) * steps_per_epoch >= args.num_batches:
             break
@@ -181,10 +181,10 @@ def main(args, trainloader, testloader):
             val_loss, val_accuracy = evaluate(net, testloader, args, verbose=True)
             scheduler.step(val_loss)
 
+    # Stop training
+    net.stop_training()
     root_span.finish()
     tracer.export_traces("worker{}.json".format(dist.get_rank()))
-    # Stop training
-    optimizer.stop()
 
     df = pd.DataFrame(logs)
     print(df)

@@ -32,6 +32,7 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
             self.senders = []
             self.receivers = []
             self.current_receiver = 0
+            self.step_span = None
             self.span = None
             self.hooks = []
             self.register_hooks()
@@ -168,10 +169,14 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                     self.send(grad, module.name, 'weight')
             self.span = self.tracer.start_span('compute')
 
-        def step_begin(self):
+        def step_begin(self, epoch, i):
             # Inform the server starting next step (by setting tensor[0] to 0)
             tensor = torch.zeros(1)
             dist.send(tensor, self.worker_id + 1)
+
+            if self.step_span is not None:
+                self.step_span.finish()
+            self.step_span = self.tracer.start_span('epoch {} step {}'.format(epoch, i))
 
             # If performing all-reduce, do not need to receive parameters from the server
             if self.all_reduce:
@@ -182,6 +187,13 @@ def build_distributed_model(model, lr, tracer, cuda=False, ignore_bn=False, no_o
                 with self.tracer.start_active_span('downlink'):
                     for _ in self.parameters_with_names:
                         self.wait_receiver()
+
+        def stop_training(self):
+            # Inform the server about completion (by setting tensor[0] to inf)
+            tensor = torch.zeros(1)
+            tensor[0] = float('inf')
+            dist.send(tensor, dist.get_rank() + 1)
+            self.step_span.finish()
 
     return DistributedModel
 
@@ -247,9 +259,3 @@ class DownpourSGD(Optimizer):
         # Will pull parameters from the server, so no need to update internal parameters
 
         return loss
-
-    def stop(self):
-        # Inform the server about completion (by setting tensor[0] to inf)
-        tensor = torch.zeros(1)
-        tensor[0] = float('inf')
-        dist.send(tensor, dist.get_rank() + 1)

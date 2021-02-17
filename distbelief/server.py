@@ -6,7 +6,6 @@ import torch
 import torch.optim
 import torch.distributed as dist
 from distbelief.utils.trace import Tracer
-import psutil
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,7 +39,10 @@ class ParameterServer:
             threads.append(thread)
 
         # Initialize communication group
-        dist.init_process_group('gloo', rank=0, world_size=2 * self.worker_num + 1, timeout=datetime.timedelta(days=1))
+        dist.init_process_group('gloo', rank=0, world_size=2 * self.worker_num + 1)
+        if self.all_reduce:
+            # Create new group for all workers to perform all_reduce
+            dist.new_group([i for i in range(1, dist.get_world_size(), 2)])
         print("server 0 initialized")
 
         # Wait for everyone to be ready
@@ -57,16 +59,14 @@ class ParameterServer:
     @classmethod
     def receive(cls, parameters_with_names, server_id, worker_num, cuda, barrier, all_reduce):
         # Set up communication group
-        dist.init_process_group('gloo', rank=server_id, world_size=2 * worker_num + 1, timeout=datetime.timedelta(days=1))
+        dist.init_process_group('gloo', rank=server_id, world_size=2 * worker_num + 1)
+        if all_reduce:
+            # Create new group for all workers to perform all_reduce
+            dist.new_group([i for i in range(1, dist.get_world_size(), 2)])
         print("server {} initialized".format(server_id))
 
         # Start tracer for each server
         tracer = Tracer(cuda=cuda)
-
-        # # Set CPU affinity for the server thread
-        # proc = psutil.Process()
-        # proc.cpu_affinity([server_id//2])
-        # print("Server {} is pinned to core {}".format(server_id, server_id//2))
 
         global_model = [para.data for _, para in parameters_with_names]
         layer_name = [name.rsplit('.', maxsplit=1) for name, _ in parameters_with_names]
@@ -99,18 +99,26 @@ class ParameterServer:
                             span.set_tag('layer', layer_name[-1 - i][0])
                             span.set_tag('type', layer_name[-1 - i][1])
                             receiver.wait()
-                    with tracer.start_active_span('update'):
-                        for i, gradients in enumerate(gradient_buffers):
-                            if cuda:
-                                global_model[i].add_(gradients.cuda())
-                            else:
-                                global_model[i].add_(gradients)
-                    with tracer.start_active_span('collect'):
-                        for i, gradients in enumerate(gradient_buffers):
-                            if cuda:
-                                gradient_buffers[i] = global_model[i].cpu()
-                            else:
-                                gradients.copy_(global_model[i])
+                            if barrier is None:  # For async
+                                if cuda:
+                                    global_model[-1 - i].add_(gradient_buffers[-1 - i].cuda())
+                                    gradient_buffers[-1 - i].copy_(global_model[-1 - i])
+                                else:
+                                    global_model[-1 - i].add_(gradient_buffers[-1 - i])
+                                    gradient_buffers[-1 - i].copy_(global_model[-1 - i])
+                    if barrier is not None:  # For sync
+                        with tracer.start_active_span('update'):
+                            for i, gradients in enumerate(gradient_buffers):
+                                if cuda:
+                                    global_model[i].add_(gradients.cuda())
+                                else:
+                                    global_model[i].add_(gradients)
+                        with tracer.start_active_span('collect'):
+                            for i, gradients in enumerate(gradient_buffers):
+                                if cuda:
+                                    gradient_buffers[i] = global_model[i].cpu()
+                                else:
+                                    gradients.copy_(global_model[i])
                     tensor = torch.zeros(1)
                     dist.recv(tensor=tensor, src=server_id - 1)
                     if barrier is not None:
